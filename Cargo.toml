@@ -20,6 +20,7 @@ argon2 = "0.6"
 rand = "0.9"
 zeroize = { version = "1", features = ["derive"] }
 walkdir = "2"
+filetime = "0.2"
 
 [package]
 name = "rust-backup"

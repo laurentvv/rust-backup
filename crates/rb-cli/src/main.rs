@@ -54,6 +54,35 @@ enum Command {
         #[arg(long)]
         job: String,
     },
+    /// Restore files or directories from a snapshot.
+    Restore {
+        /// Job name or id.
+        #[arg(long)]
+        job: String,
+        /// Snapshot id to restore from.
+        #[arg(long)]
+        snapshot: Uuid,
+        /// Path to restore, relative to a source root (repeatable; default:
+        /// the whole snapshot).
+        #[arg(long = "path")]
+        paths: Vec<PathBuf>,
+        /// Restore into this directory instead of the original location
+        /// (structure preserved under it).
+        #[arg(long)]
+        to: Option<PathBuf>,
+        /// Overwrite policy for existing files: skip (default) or overwrite.
+        #[arg(long, default_value = "skip")]
+        overwrite: String,
+    },
+    /// Verify repository integrity (quick or full).
+    Verify {
+        /// Job name or id (selects the repository).
+        #[arg(long)]
+        job: String,
+        /// Full check: read + authenticate + re-hash every chunk.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -219,6 +248,103 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Command::Restore {
+            job,
+            snapshot,
+            paths,
+            to,
+            overwrite,
+        } => {
+            let catalog = Catalog::open(&db_path)?;
+            let config = find_job(&catalog, &job)?;
+            let passphrase = read_passphrase()?;
+            let repo = open_repo(&config, &passphrase)?;
+
+            let manifest = repo
+                .read_manifest(&snapshot)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let selection: Vec<rb_core::restore::RestoreSelection> = manifest
+                .sources
+                .iter()
+                .flat_map(|s| {
+                    let root = s.root.clone();
+                    let paths = if paths.is_empty() {
+                        vec![PathBuf::new()]
+                    } else {
+                        paths.clone()
+                    };
+                    paths
+                        .into_iter()
+                        .map(move |p| rb_core::restore::RestoreSelection {
+                            source_root: root.clone(),
+                            rel_path: p,
+                        })
+                })
+                .collect();
+
+            let destination = match &to {
+                Some(base) => rb_core::restore::RestoreDestination::Target(base.clone()),
+                None => rb_core::restore::RestoreDestination::Original,
+            };
+            let overwrite = match overwrite.as_str() {
+                "overwrite" => rb_core::restore::OverwritePolicy::Overwrite,
+                _ => rb_core::restore::OverwritePolicy::Skip,
+            };
+            let options = rb_core::restore::RestoreOptions {
+                overwrite,
+                cancel: None,
+            };
+
+            let stats = rb_core::restore::restore(
+                &repo,
+                &snapshot,
+                &selection,
+                &destination,
+                &options,
+                |event| {
+                    if let rb_core::restore::RestoreEvent::FileSkipped { dest, reason } = event {
+                        eprintln!("skipped: {} ({reason})", dest.display());
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            println!(
+                "restored: {} files ({} bytes), {} skipped, {} directories created",
+                stats.files_restored, stats.bytes_restored, stats.files_skipped, stats.dirs_created
+            );
+        }
+        Command::Verify { job, full } => {
+            let catalog = Catalog::open(&db_path)?;
+            let config = find_job(&catalog, &job)?;
+            let passphrase = read_passphrase()?;
+            let repo = open_repo(&config, &passphrase)?;
+            let mode = if full {
+                rb_core::verify::VerifyMode::Full
+            } else {
+                rb_core::verify::VerifyMode::Quick
+            };
+            let report = rb_core::verify::verify(&repo, mode, None, |_, _| Ok(()))
+                .map_err(|e| anyhow::anyhow!(e))?;
+            catalog
+                .insert_verify_result(&repo.describe(), &report)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            println!(
+                "verify [{}] on {}: {} ({} snapshots, {} chunks, {} orphans)",
+                report.mode.as_str(),
+                repo.describe(),
+                if report.ok() { "OK" } else { "FAILED" },
+                report.manifests_checked,
+                report.chunks_checked,
+                report.orphan_chunks
+            );
+            for issue in &report.issues {
+                println!("  ! {}", issue.message);
+            }
+            if !report.ok() {
+                std::process::exit(2);
+            }
+        }
     }
     Ok(())
 }
@@ -313,6 +439,13 @@ fn run_job(
         error: None,
     };
     catalog.insert_run(&record)?;
+    catalog.insert_snapshot(
+        snapshot_id,
+        config.id,
+        record.finished_at,
+        stats.files_total,
+        stats.bytes_total,
+    )?;
     let _ = files_done;
     Ok((snapshot_id, stats))
 }

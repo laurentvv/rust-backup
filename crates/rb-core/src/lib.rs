@@ -25,5 +25,7 @@ pub mod error;
 pub mod hash;
 pub mod manifest;
 pub mod repo;
+pub mod restore;
+pub mod verify;
 
 pub use error::{Error, Result};

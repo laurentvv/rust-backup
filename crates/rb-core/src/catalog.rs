@@ -13,9 +13,10 @@ use crate::domain::{JobConfig, JobId};
 
 /// Ordered schema migrations; the highest applied version is stored in
 /// `schema_migrations`.
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_jobs_and_runs",
-    r#"
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_jobs_and_runs",
+        r#"
     CREATE TABLE IF NOT EXISTS jobs (
         id                 VARCHAR PRIMARY KEY,
         name               VARCHAR NOT NULL,
@@ -37,7 +38,43 @@ const MIGRATIONS: &[(&str, &str)] = &[(
         error         VARCHAR
     );
     "#,
-)];
+    ),
+    (
+        "0002_snapshots_and_verify",
+        r#"
+    CREATE TABLE IF NOT EXISTS snapshots (
+        id           VARCHAR PRIMARY KEY,
+        job_id       VARCHAR NOT NULL,
+        created_at   VARCHAR NOT NULL,
+        files_total  UBIGINT NOT NULL,
+        bytes_total  UBIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS verify_results (
+        id              VARCHAR PRIMARY KEY,
+        repo            VARCHAR NOT NULL,
+        mode            VARCHAR NOT NULL,
+        ok              BOOLEAN NOT NULL,
+        checked_chunks  UBIGINT NOT NULL,
+        errors_json     VARCHAR NOT NULL,
+        finished_at     VARCHAR NOT NULL
+    );
+    "#,
+    ),
+];
+
+/// Cached snapshot row for fast browsing (local catalog only; the
+/// repository remains the source of truth).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotSummary {
+    /// Snapshot id.
+    pub id: crate::domain::SnapshotId,
+    /// When the snapshot was created (UTC).
+    pub created_at: DateTime<Utc>,
+    /// Files captured.
+    pub files_total: u64,
+    /// Bytes captured.
+    pub bytes_total: u64,
+}
 
 /// Handle to the local catalog database. Opening migrates the schema to the
 /// latest version.
@@ -266,6 +303,144 @@ impl Catalog {
         }
         Ok(runs)
     }
+
+    /// Records a finalized snapshot (cache for fast browsing).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Catalog`] on database errors.
+    pub fn insert_snapshot(
+        &self,
+        snapshot_id: crate::domain::SnapshotId,
+        job_id: JobId,
+        created_at: DateTime<Utc>,
+        files_total: u64,
+        bytes_total: u64,
+    ) -> crate::Result<()> {
+        self.conn.execute(
+            "INSERT INTO snapshots (id, job_id, created_at, files_total, bytes_total) VALUES (?, ?, ?, ?, ?)",
+            duckdb::params![
+                snapshot_id.to_string(),
+                job_id.to_string(),
+                created_at.to_rfc3339(),
+                files_total as i64,
+                bytes_total as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Lists cached snapshots of a job, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Catalog`] on database errors.
+    pub fn list_snapshots(&self, job_id: JobId) -> crate::Result<Vec<SnapshotSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_at, files_total, bytes_total FROM snapshots
+             WHERE job_id = ? ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([job_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, created, files, bytes) = row?;
+            let created_at = DateTime::parse_from_rfc3339(&created)
+                .map(|t| t.with_timezone(&Utc))
+                .map_err(|e| crate::Error::InvalidJob(format!("stored timestamp invalid: {e}")))?;
+            let id = Uuid::parse_str(&id).map_err(|e| {
+                crate::Error::InvalidJob(format!("stored snapshot id invalid: {e}"))
+            })?;
+            out.push(SnapshotSummary {
+                id,
+                created_at,
+                files_total: files.unsigned_abs(),
+                bytes_total: bytes.unsigned_abs(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Records a verification result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Catalog`] on database errors and
+    /// [`Error::Json`] when the issues list cannot be serialized.
+    pub fn insert_verify_result(
+        &self,
+        repo: &str,
+        report: &crate::verify::VerifyReport,
+    ) -> crate::Result<()> {
+        let issues: Vec<String> = report.issues.iter().map(|i| i.message.clone()).collect();
+        self.conn.execute(
+            "INSERT INTO verify_results (id, repo, mode, ok, checked_chunks, errors_json, finished_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            duckdb::params![
+                Uuid::new_v4().to_string(),
+                repo,
+                report.mode.as_str(),
+                report.ok(),
+                report.chunks_checked as i64,
+                serde_json::to_string(&issues)?,
+                report.finished_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Latest verification results (newest first), with their issue lists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Catalog`] on database errors.
+    pub fn list_verify_results(
+        &self,
+        limit: u64,
+    ) -> crate::Result<Vec<crate::verify::VerifyOutcome>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT repo, mode, ok, checked_chunks, errors_json, finished_at
+             FROM verify_results ORDER BY finished_at DESC LIMIT ?",
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (repo, mode, ok, chunks, errors_json, finished) = row?;
+            let issues: Vec<String> =
+                serde_json::from_str(&errors_json).map_err(crate::Error::Json)?;
+            let mode = match mode.as_str() {
+                "quick" => crate::verify::VerifyMode::Quick,
+                _ => crate::verify::VerifyMode::Full,
+            };
+            let finished_at = DateTime::parse_from_rfc3339(&finished)
+                .map(|t| t.with_timezone(&Utc))
+                .map_err(|e| crate::Error::InvalidJob(format!("stored timestamp invalid: {e}")))?;
+            out.push(crate::verify::VerifyOutcome {
+                repo,
+                mode,
+                ok,
+                chunks_checked: chunks.unsigned_abs(),
+                issues,
+                finished_at,
+            });
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -380,5 +555,53 @@ mod tests {
             1
         );
         assert_eq!(runs[1].error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn snapshots_and_verify_results_should_roundtrip() {
+        let catalog = Catalog::open_in_memory().expect("catalog");
+        let job = sample_job("tracked");
+        catalog.insert_job(&job).expect("insert job");
+
+        catalog
+            .insert_snapshot(Uuid::new_v4(), job.id, Utc::now(), 12, 34_000)
+            .expect("snapshot 1");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let second = Uuid::new_v4();
+        catalog
+            .insert_snapshot(second, job.id, Utc::now(), 15, 40_000)
+            .expect("snapshot 2");
+
+        let snapshots = catalog.list_snapshots(job.id).expect("list snapshots");
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].id, second, "newest first");
+        assert_eq!(snapshots[0].files_total, 15);
+        assert_eq!(snapshots[1].bytes_total, 34_000);
+
+        let report = {
+            let mut r = crate::verify::VerifyReport {
+                mode: crate::verify::VerifyMode::Full,
+                started_at: Utc::now(),
+                finished_at: Utc::now(),
+                manifests_checked: 2,
+                chunks_checked: 9,
+                orphan_chunks: 0,
+                issues: vec![crate::verify::VerifyIssue {
+                    message: "chunk abc is MISSING".into(),
+                }],
+            };
+            r.finished_at = Utc::now();
+            r
+        };
+        catalog
+            .insert_verify_result("local: E:\\bk", &report)
+            .expect("insert verify");
+
+        let outcomes = catalog.list_verify_results(10).expect("list verify");
+        assert_eq!(outcomes.len(), 1);
+        assert!(!outcomes[0].ok);
+        assert_eq!(outcomes[0].mode, crate::verify::VerifyMode::Full);
+        assert_eq!(outcomes[0].chunks_checked, 9);
+        assert_eq!(outcomes[0].issues, vec!["chunk abc is MISSING".to_string()]);
     }
 }

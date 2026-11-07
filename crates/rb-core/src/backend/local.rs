@@ -52,13 +52,23 @@ impl StorageBackend for LocalFs {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = target.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
-        std::fs::write(&tmp, data)?;
-        // On Windows, rename fails when the target exists: remove first,
-        // then rename — a crash between the two leaves the old intact file.
-        if target.exists() {
-            std::fs::remove_file(&target)?;
+        // Durable write: the bytes reach the device (sync_all) BEFORE the
+        // rename publishes the name. Without it, unplugging a USB disk can
+        // leave a renamed but truncated chunk that dedup would trust forever.
+        let written = (|| -> std::io::Result<()> {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(data)?;
+            file.sync_all()
+        })();
+        // `std::fs::rename` replaces an existing target atomically on both
+        // Windows (MoveFileExW + REPLACE_EXISTING) and POSIX: there is never a
+        // window where the target name is missing.
+        let renamed = written.and_then(|()| std::fs::rename(&tmp, &target));
+        if let Err(err) = renamed {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
         }
-        std::fs::rename(&tmp, &target)?;
         Ok(())
     }
 
@@ -120,6 +130,27 @@ mod tests {
         assert_eq!(be.read("chunks/ab/hash.chunk").expect("read"), b"payload-2");
         let leftovers = be.list("chunks").expect("list");
         assert_eq!(leftovers, vec!["chunks/ab/hash.chunk".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_atomic_replaces_target_without_gap() {
+        let dir = std::env::temp_dir().join(format!("rb-localbe-{}", Uuid::new_v4()));
+        let be = LocalFs::new(&dir);
+        be.write_atomic("snapshots/s.snap", b"old").expect("write");
+        // A failing write (parent path is a FILE) must neither touch the
+        // existing target nor leave a temp file behind.
+        be.write_atomic("snapshots/s.snap/child", b"x")
+            .expect_err("cannot create a child of a file");
+        assert_eq!(be.read("snapshots/s.snap").expect("read"), b"old");
+        // A successful overwrite replaces the content in one rename.
+        be.write_atomic("snapshots/s.snap", b"new")
+            .expect("rewrite");
+        assert_eq!(be.read("snapshots/s.snap").expect("read"), b"new");
+        assert_eq!(
+            be.list("snapshots").expect("list"),
+            vec!["snapshots/s.snap".to_string()]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

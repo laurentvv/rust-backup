@@ -29,7 +29,7 @@ rust-backup (GUI bin, GPUI Kit 0.9.0)
 
 ## Backends
 
-`StorageBackend` addresses the repository with `/`-separated relative paths; `LocalFs` (USB/internal) and `SftpBackend` (russh 0.65 + russh-sftp 3.0, public-key auth, Argon2-passphrase-protected keys supported, host keys pinned trust-on-first-use by SHA-256 fingerprint in a known-hosts file) implement it. SFTP runs on a private tokio runtime; writes are temp-file + rename.
+`StorageBackend` addresses the repository with `/`-separated relative paths; `LocalFs` (USB/internal) and `SftpBackend` (russh 0.65 + russh-sftp 3.0, public-key auth, Argon2-passphrase-protected keys supported, host keys pinned trust-on-first-use by SHA-256 fingerprint in a known-hosts file) implement it. SFTP runs on a private tokio runtime. All writes are temp file + flush to stable storage + rename (see REPO_FORMAT.md, Atomicity).
 
 ## Threading (GUI)
 

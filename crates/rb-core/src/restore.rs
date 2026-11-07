@@ -222,15 +222,15 @@ fn restore_file(
     chunks: &[crate::manifest::ChunkRef],
     dest: &Path,
 ) -> crate::Result<()> {
-    let tmp = dest.with_extension(format!("rbrestore-{}", uuid::Uuid::new_v4().simple()));
+    let tmp =
+        TempFileGuard(dest.with_extension(format!("rbrestore-{}", uuid::Uuid::new_v4().simple())));
     {
         use std::io::Write as _;
-        let mut out = std::fs::File::create(&tmp)?;
+        let mut out = std::fs::File::create(&tmp.0)?;
         for chunk in chunks {
             let plaintext = repo.read_chunk(&chunk.hash, chunk.plain_len)?;
             let actual = crate::hash::ChunkHash::from_data(&plaintext);
             if actual != chunk.hash {
-                std::fs::remove_file(&tmp).ok();
                 return Err(crate::Error::Repo(format!(
                     "chunk {} content does not match its address",
                     chunk.hash
@@ -240,11 +240,28 @@ fn restore_file(
         }
         out.sync_all()?;
     }
-    if dest.exists() {
-        std::fs::remove_file(dest)?;
-    }
-    std::fs::rename(&tmp, dest)?;
+    // `rename` replaces an existing file atomically (Windows and POSIX):
+    // an interrupted restore leaves either the old file or the new one.
+    std::fs::rename(&tmp.0, dest)?;
+    tmp.disarm();
     Ok(())
+}
+
+/// Removes its temp file on drop unless disarmed, so that EVERY early
+/// return of [`restore_file`] (I/O error, AEAD failure, hash mismatch)
+/// leaves no `.rbrestore-*` file behind.
+struct TempFileGuard(std::path::PathBuf);
+
+impl TempFileGuard {
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn set_mtime(path: &Path, mtime_ns: i64) {

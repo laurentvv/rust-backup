@@ -66,6 +66,7 @@ fn fixture(tag: &str) -> Fixture {
         destination: Destination::Local { root: dest.clone() },
         compression_level: 5,
         excludes: vec![],
+        max_incrementals: 10,
         created_at: chrono::Utc::now(),
     };
     let backend: Arc<dyn StorageBackend> = Arc::new(LocalFs::new(&dest));

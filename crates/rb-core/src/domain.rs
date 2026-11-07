@@ -52,6 +52,51 @@ impl Destination {
     }
 }
 
+/// Default number of incremental backups before 1 full backup is scheduled.
+pub const DEFAULT_MAX_INCREMENTALS: u32 = 10;
+
+fn default_max_incrementals() -> u32 {
+    DEFAULT_MAX_INCREMENTALS
+}
+
+/// Kind of backup run (full vs incremental).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupKind {
+    /// Full backup: re-scans, re-chunks and re-authenticates every file from scratch.
+    Full,
+    /// Incremental backup: reuses chunk lists of unchanged files (size + mtime).
+    #[default]
+    Incremental,
+}
+
+impl BackupKind {
+    /// Stable lowercase string for display and storage.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Incremental => "incremental",
+        }
+    }
+
+    /// Parses the keyword stored by [`BackupKind::as_str`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidJob`](crate::Error::InvalidJob) when the keyword
+    /// is unknown.
+    pub fn parse(value: &str) -> crate::Result<Self> {
+        match value {
+            "full" => Ok(Self::Full),
+            "incremental" => Ok(Self::Incremental),
+            other => Err(crate::Error::InvalidJob(format!(
+                "unknown backup kind: {other}"
+            ))),
+        }
+    }
+}
+
 /// A user-configured backup job (sources, destination, tuning).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobConfig {
@@ -68,6 +113,10 @@ pub struct JobConfig {
     /// Glob or name patterns to exclude from backups (e.g. `target`, `node_modules`, `*.tmp`).
     #[serde(default)]
     pub excludes: Vec<String>,
+    /// Number of incremental backups to perform before forcing 1 full backup.
+    /// 0 = disabled (always incremental after initial full backup).
+    #[serde(default = "default_max_incrementals")]
+    pub max_incrementals: u32,
     /// Creation timestamp (UTC).
     pub created_at: DateTime<Utc>,
 }
@@ -163,6 +212,9 @@ pub struct RunRecord {
     pub chunks_new: u64,
     /// Number of (uncompressed) bytes in newly written chunks.
     pub bytes_new: u64,
+    /// Kind of backup run (full or incremental).
+    #[serde(default)]
+    pub kind: BackupKind,
     /// Error message when the run failed.
     pub error: Option<String>,
 }

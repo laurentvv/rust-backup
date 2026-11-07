@@ -69,6 +69,8 @@ pub struct BackupStats {
     pub bytes_new: u64,
     /// Files skipped (locked/unreadable).
     pub files_skipped: u64,
+    /// Kind of backup run performed (full or incremental).
+    pub kind: crate::domain::BackupKind,
 }
 
 /// Options for a backup run.
@@ -77,6 +79,10 @@ pub struct BackupOptions {
     /// Cooperative cancellation flag; checked between files. When set, the
     /// run aborts WITHOUT finalizing a snapshot.
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Explicit override for backup kind.
+    /// `None` lets the engine decide automatically based on `job.max_incrementals`
+    /// and the history of snapshots for this job.
+    pub force_kind: Option<crate::domain::BackupKind>,
 }
 
 /// Runs one backup of `job` into `repo`.
@@ -101,11 +107,32 @@ pub fn run_backup(
     let chunker_cfg: ChunkerConfig = repo.config().chunker;
     let cancel = options.cancel.clone();
 
-    // Fast path: reuse chunk lists of unchanged files (size + mtime) from
-    // the previous snapshot of this job.
     let previous = repo.latest_manifest_for_job(&job.id)?;
+
+    // Determine whether this run is Full or Incremental:
+    let kind = if let Some(forced) = options.force_kind {
+        forced
+    } else if previous.is_none() {
+        // Initial backup for a job is always full.
+        crate::domain::BackupKind::Full
+    } else if job.max_incrementals == 0 {
+        // Cadence disabled: always incremental after initial full.
+        crate::domain::BackupKind::Incremental
+    } else {
+        let consec = repo.count_consecutive_incrementals_for_job(&job.id)?;
+        if consec >= job.max_incrementals {
+            crate::domain::BackupKind::Full
+        } else {
+            crate::domain::BackupKind::Incremental
+        }
+    };
+
+    // Fast path: reuse chunk lists of unchanged files (size + mtime) from
+    // the previous snapshot of this job IF this is an incremental run.
     let mut prev_index: HashMap<(String, String), FileEntry> = HashMap::new();
-    if let Some(prev) = &previous {
+    if kind == crate::domain::BackupKind::Incremental
+        && let Some(prev) = &previous
+    {
         for source in &prev.sources {
             let root_key = source.root.to_string_lossy().to_string();
             for entry in &source.entries {
@@ -118,7 +145,11 @@ pub fn run_backup(
     }
 
     let mut manifest = SnapshotManifest::new(job.id, &job.name);
-    let mut stats = BackupStats::default();
+    manifest.kind = kind;
+    let mut stats = BackupStats {
+        kind,
+        ..Default::default()
+    };
 
     for source_root in &job.sources {
         let root_key = source_root.to_string_lossy().to_string();

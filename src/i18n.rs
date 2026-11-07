@@ -232,6 +232,18 @@ pub struct Texts {
     pub confirm_delete_snapshot_desc: &'static str,
     /// Snapshot deleted toast.
     pub snapshot_deleted: &'static str,
+    /// Cadence: max incrementals before full.
+    pub max_incrementals: &'static str,
+    /// Cadence help text.
+    pub max_incrementals_hint: &'static str,
+    /// Mode: full.
+    pub mode_full: &'static str,
+    /// Mode: incremental.
+    pub mode_incremental: &'static str,
+    /// Force full backup toggle.
+    pub force_full: &'static str,
+    /// Cadence badge.
+    pub cadence_badge: &'static str,
 }
 
 /// French strings.
@@ -345,6 +357,12 @@ pub const FR: Texts = Texts {
     confirm_delete_snapshot: "Supprimer l'instantané",
     confirm_delete_snapshot_desc: "Supprimer définitivement cet instantané ? Ses données uniques pourront être purgées lors du nettoyage.",
     snapshot_deleted: "Instantané supprimé",
+    max_incrementals: "Périodicité sauvegarde complète (0 = désactivé)",
+    max_incrementals_hint: "Nombre d'incrémentales avant 1 sauvegarde complète",
+    mode_full: "Complète",
+    mode_incremental: "Incrémentale",
+    force_full: "Forcer une sauvegarde complète",
+    cadence_badge: "Cadence Full",
 };
 
 /// English strings.
@@ -458,6 +476,12 @@ pub const EN: Texts = Texts {
     confirm_delete_snapshot: "Delete snapshot",
     confirm_delete_snapshot_desc: "Permanently delete this snapshot? Unique chunks will be reclaimed on next prune.",
     snapshot_deleted: "Snapshot deleted",
+    max_incrementals: "Full backup cadence (0 = disabled)",
+    max_incrementals_hint: "Number of incrementals before 1 full backup",
+    mode_full: "Full",
+    mode_incremental: "Incremental",
+    force_full: "Force full backup",
+    cadence_badge: "Full Cadence",
 };
 
 impl Lang {

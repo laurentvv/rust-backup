@@ -38,6 +38,19 @@ pub enum Error {
     /// An encryption or authentication operation failed.
     #[error("crypto error: {0}")]
     Crypto(String),
+
+    /// The operation was cancelled through the cooperative cancel flag.
+    #[error("cancelled by user")]
+    Cancelled,
+
+    /// The repository format is violated (bad magic, unsupported version,
+    /// inconsistent metadata).
+    #[error("repository format error: {0}")]
+    Repo(String),
+
+    /// A directory walk failed.
+    #[error("directory walk error: {0}")]
+    Walk(#[from] walkdir::Error),
 }
 
 /// Convenience alias used across the library.

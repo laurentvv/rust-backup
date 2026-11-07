@@ -14,6 +14,8 @@
 // outside tests).
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod backend;
+pub mod backup;
 pub mod catalog;
 pub mod chunker;
 pub mod compress;
@@ -21,5 +23,7 @@ pub mod crypto;
 pub mod domain;
 pub mod error;
 pub mod hash;
+pub mod manifest;
+pub mod repo;
 
 pub use error::{Error, Result};

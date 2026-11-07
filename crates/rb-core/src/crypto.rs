@@ -267,6 +267,55 @@ impl ChunkCipher {
                 ))
             })
     }
+
+    /// Seals `plaintext` with caller-chosen associated data; returns
+    /// `nonce || ciphertext||tag`. Used for repository documents that are
+    /// not content-addressed chunks (e.g. snapshot manifests).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Crypto`](crate::Error::Crypto) on encryption
+    /// failure.
+    pub fn seal_with_ad(&self, plaintext: &[u8], ad: &[u8]) -> crate::Result<Vec<u8>> {
+        let mut nonce_bytes = [0u8; NONCE_SIZE];
+        rand::rng().fill_bytes(&mut nonce_bytes);
+        let sealed = self
+            .cipher
+            .encrypt(
+                Nonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: plaintext,
+                    aad: ad,
+                },
+            )
+            .map_err(|_| crate::Error::Crypto("failed to seal document".into()))?;
+        let mut out = Vec::with_capacity(NONCE_SIZE + sealed.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&sealed);
+        Ok(out)
+    }
+
+    /// Opens a blob produced by [`ChunkCipher::seal_with_ad`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Crypto`](crate::Error::Crypto) when the blob is
+    /// truncated, tampered with, or sealed with different associated data.
+    pub fn open_with_ad(&self, blob: &[u8], ad: &[u8]) -> crate::Result<Vec<u8>> {
+        if blob.len() < NONCE_SIZE + TAG_SIZE {
+            return Err(crate::Error::Crypto("document blob too short".into()));
+        }
+        let (nonce_bytes, sealed) = blob.split_at(NONCE_SIZE);
+        self.cipher
+            .decrypt(
+                Nonce::from_slice(nonce_bytes),
+                Payload {
+                    msg: sealed,
+                    aad: ad,
+                },
+            )
+            .map_err(|_| crate::Error::Crypto("document authentication failed".into()))
+    }
 }
 
 /// Derives the 32-byte key-encryption key from the passphrase.

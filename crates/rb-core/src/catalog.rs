@@ -190,6 +190,82 @@ impl Catalog {
             .execute("DELETE FROM jobs WHERE id = ?", [id.to_string()])?;
         Ok(deleted > 0)
     }
+
+    /// Records the outcome of a backup run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Catalog`] on database errors.
+    pub fn insert_run(&self, run: &crate::domain::RunRecord) -> crate::Result<()> {
+        self.conn.execute(
+            "INSERT INTO runs (id, job_id, started_at, finished_at, status, files_total, bytes_total, chunks_new, bytes_new, error)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            duckdb::params![
+                run.id.to_string(),
+                run.job_id.to_string(),
+                run.started_at.to_rfc3339(),
+                run.finished_at.to_rfc3339(),
+                run.status.as_str(),
+                run.files_total as i64,
+                run.bytes_total as i64,
+                run.chunks_new as i64,
+                run.bytes_new as i64,
+                run.error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Lists runs of a job, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Catalog`] on database errors and
+    /// [`Error::InvalidJob`] when a stored row cannot be decoded.
+    pub fn list_runs(&self, job_id: JobId) -> crate::Result<Vec<crate::domain::RunRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, job_id, started_at, finished_at, status, files_total, bytes_total, chunks_new, bytes_new, error
+             FROM runs WHERE job_id = ? ORDER BY started_at DESC",
+        )?;
+        let rows = stmt.query_map([job_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, Option<String>>(9)?,
+            ))
+        })?;
+        let mut runs = Vec::new();
+        for row in rows {
+            let (id, job, started, finished, status, files, bytes, chunks, new_bytes, error) = row?;
+            let parse_ts = |v: &str| -> crate::Result<DateTime<Utc>> {
+                DateTime::parse_from_rfc3339(v)
+                    .map(|t| t.with_timezone(&Utc))
+                    .map_err(|e| crate::Error::InvalidJob(format!("stored timestamp invalid: {e}")))
+            };
+            runs.push(crate::domain::RunRecord {
+                id: Uuid::parse_str(&id)
+                    .map_err(|e| crate::Error::InvalidJob(format!("stored run id invalid: {e}")))?,
+                job_id: Uuid::parse_str(&job)
+                    .map_err(|e| crate::Error::InvalidJob(format!("stored job id invalid: {e}")))?,
+                started_at: parse_ts(&started)?,
+                finished_at: parse_ts(&finished)?,
+                status: crate::domain::RunStatus::parse(&status)?,
+                files_total: files.unsigned_abs(),
+                bytes_total: bytes.unsigned_abs(),
+                chunks_new: chunks.unsigned_abs(),
+                bytes_new: new_bytes.unsigned_abs(),
+                error,
+            });
+        }
+        Ok(runs)
+    }
 }
 
 #[cfg(test)]
@@ -264,5 +340,45 @@ mod tests {
             .expect("count migrations");
         assert_eq!(applied, MIGRATIONS.len() as i64);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn insert_and_list_runs_should_roundtrip_newest_first() {
+        use crate::domain::{RunRecord, RunStatus};
+        let catalog = Catalog::open_in_memory().expect("catalog");
+        let job = sample_job("runner");
+        catalog.insert_job(&job).expect("insert job");
+
+        let base = Utc::now();
+        for (i, status) in [RunStatus::Success, RunStatus::Failed, RunStatus::Success]
+            .into_iter()
+            .enumerate()
+        {
+            let record = RunRecord {
+                id: Uuid::new_v4(),
+                job_id: job.id,
+                started_at: base - chrono::Duration::minutes((10 - i as i64) * 10),
+                finished_at: base - chrono::Duration::minutes((9 - i as i64) * 10),
+                status,
+                files_total: 10 + i as u64,
+                bytes_total: 1000 * (i as u64 + 1),
+                chunks_new: 3 + i as u64,
+                bytes_new: 300 * (i as u64 + 1),
+                error: (status == RunStatus::Failed).then(|| "boom".into()),
+            };
+            catalog.insert_run(&record).expect("insert run");
+        }
+
+        let runs = catalog.list_runs(job.id).expect("list runs");
+        assert_eq!(runs.len(), 3);
+        assert!(runs[0].started_at > runs[1].started_at, "newest first");
+        assert_eq!(runs[0].files_total, 12);
+        assert_eq!(
+            runs.iter()
+                .filter(|r| r.status == RunStatus::Failed)
+                .count(),
+            1
+        );
+        assert_eq!(runs[1].error.as_deref(), Some("boom"));
     }
 }

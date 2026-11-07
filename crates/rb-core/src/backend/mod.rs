@@ -5,8 +5,10 @@
 //! identical for a USB disk and a remote SFTP server.
 
 pub mod local;
+pub mod sftp;
 
 pub use local::LocalFs;
+pub use sftp::{HostKeyPolicy, SftpBackend, SftpConnect};
 
 /// Read/write access to the physical repository files.
 ///

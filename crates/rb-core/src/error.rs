@@ -51,6 +51,14 @@ pub enum Error {
     /// A directory walk failed.
     #[error("directory walk error: {0}")]
     Walk(#[from] walkdir::Error),
+
+    /// An SSH transport error.
+    #[error("ssh error: {0}")]
+    Ssh(#[from] russh::Error),
+
+    /// An SFTP protocol error.
+    #[error("sftp error: {0}")]
+    Sftp(#[from] russh_sftp::client::error::Error),
 }
 
 /// Convenience alias used across the library.

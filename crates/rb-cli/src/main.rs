@@ -21,6 +21,10 @@ struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
 
+    /// Accept ANY SSH host key (TESTS ONLY; default is trust-on-first-use).
+    #[arg(long, global = true)]
+    insecure_accept_any_host_key: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -87,14 +91,29 @@ enum Command {
 
 #[derive(Subcommand)]
 enum RepoAction {
-    /// Create a new encrypted repository on a local destination.
+    /// Create a new encrypted repository (local or SFTP destination).
     Init {
-        /// Repository root folder (USB disk, ...).
-        #[arg(long)]
-        dest: PathBuf,
+        /// Local repository root folder (USB disk, ...).
+        #[arg(long, required_unless_present = "sftp_host")]
+        dest: Option<PathBuf>,
         /// zstd compression level 0..=22 (default 5).
         #[arg(long, default_value_t = 5)]
         level: i32,
+        /// SFTP server host (switches the destination to SFTP).
+        #[arg(long)]
+        sftp_host: Option<String>,
+        /// SFTP port (default 22).
+        #[arg(long, default_value_t = 22)]
+        sftp_port: u16,
+        /// SFTP user name.
+        #[arg(long)]
+        sftp_user: Option<String>,
+        /// Private key file for SFTP (passphrase via RBACKUP_KEY_PASSPHRASE).
+        #[arg(long)]
+        sftp_key: Option<PathBuf>,
+        /// Repository root on the SFTP server.
+        #[arg(long)]
+        sftp_root: Option<String>,
     },
 }
 
@@ -109,11 +128,26 @@ enum JobsAction {
         #[arg(long = "source", required = true)]
         sources: Vec<PathBuf>,
         /// Repository root folder on the local filesystem.
-        #[arg(long)]
-        local_root: PathBuf,
+        #[arg(long, required_unless_present = "sftp_host")]
+        local_root: Option<PathBuf>,
         /// zstd compression level 0..=22 (default 5).
         #[arg(long, default_value_t = 5)]
         compression: i32,
+        /// SFTP server host (switches the destination to SFTP).
+        #[arg(long)]
+        sftp_host: Option<String>,
+        /// SFTP port (default 22).
+        #[arg(long, default_value_t = 22)]
+        sftp_port: u16,
+        /// SFTP user name.
+        #[arg(long)]
+        sftp_user: Option<String>,
+        /// Private key file for SFTP.
+        #[arg(long)]
+        sftp_key: Option<PathBuf>,
+        /// Repository root on the SFTP server.
+        #[arg(long)]
+        sftp_root: Option<String>,
     },
     /// List configured jobs.
     List,
@@ -154,13 +188,21 @@ fn main() -> anyhow::Result<()> {
                 sources,
                 local_root,
                 compression,
+                sftp_host,
+                sftp_port,
+                sftp_user,
+                sftp_key,
+                sftp_root,
             } => {
                 let catalog = Catalog::open(&db_path)?;
+                let destination = build_destination(
+                    local_root, sftp_host, sftp_port, sftp_user, sftp_key, sftp_root,
+                )?;
                 let job = JobConfig {
                     id: Uuid::new_v4(),
                     name,
                     sources,
-                    destination: Destination::Local { root: local_root },
+                    destination,
                     compression_level: compression,
                     created_at: chrono_now(),
                 };
@@ -196,9 +238,19 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Command::Repo { action } => match action {
-            RepoAction::Init { dest, level } => {
+            RepoAction::Init {
+                dest,
+                level,
+                sftp_host,
+                sftp_port,
+                sftp_user,
+                sftp_key,
+                sftp_root,
+            } => {
                 let passphrase = read_passphrase()?;
-                let backend = std::sync::Arc::new(rb_core::backend::LocalFs::new(&dest));
+                let destination =
+                    build_destination(dest, sftp_host, sftp_port, sftp_user, sftp_key, sftp_root)?;
+                let backend = open_backend(&destination, cli.insecure_accept_any_host_key)?;
                 let repo = rb_core::repo::Repository::init(
                     backend,
                     &passphrase,
@@ -209,7 +261,7 @@ fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!(e))?;
                 println!(
                     "repository initialized at {} (key {})",
-                    dest.display(),
+                    repo.describe(),
                     repo.key_id()
                 );
             }
@@ -233,7 +285,7 @@ fn main() -> anyhow::Result<()> {
             let catalog = Catalog::open(&db_path)?;
             let config = find_job(&catalog, &job)?;
             let passphrase = read_passphrase()?;
-            let repo = open_repo(&config, &passphrase)?;
+            let repo = open_repo(&config, &passphrase, cli.insecure_accept_any_host_key)?;
             for manifest in repo.all_manifests().map_err(|e| anyhow::anyhow!(e))? {
                 if manifest.job_id != config.id {
                     continue;
@@ -258,7 +310,7 @@ fn main() -> anyhow::Result<()> {
             let catalog = Catalog::open(&db_path)?;
             let config = find_job(&catalog, &job)?;
             let passphrase = read_passphrase()?;
-            let repo = open_repo(&config, &passphrase)?;
+            let repo = open_repo(&config, &passphrase, cli.insecure_accept_any_host_key)?;
 
             let manifest = repo
                 .read_manifest(&snapshot)
@@ -318,7 +370,7 @@ fn main() -> anyhow::Result<()> {
             let catalog = Catalog::open(&db_path)?;
             let config = find_job(&catalog, &job)?;
             let passphrase = read_passphrase()?;
-            let repo = open_repo(&config, &passphrase)?;
+            let repo = open_repo(&config, &passphrase, cli.insecure_accept_any_host_key)?;
             let mode = if full {
                 rb_core::verify::VerifyMode::Full
             } else {
@@ -369,14 +421,81 @@ fn read_passphrase() -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("set RBACKUP_PASSPHRASE to the repository passphrase"))
 }
 
-/// Opens the job's repository (local destinations only for now).
-fn open_repo(config: &JobConfig, passphrase: &str) -> anyhow::Result<rb_core::repo::Repository> {
-    let backend: std::sync::Arc<dyn rb_core::backend::StorageBackend> = match &config.destination {
-        Destination::Local { root } => std::sync::Arc::new(rb_core::backend::LocalFs::new(root)),
-        Destination::Sftp { .. } => {
-            anyhow::bail!("SFTP destinations are not supported yet (planned milestone)")
+/// Builds a destination from CLI flags (exactly one of local/SFTP).
+#[allow(clippy::too_many_arguments)]
+fn build_destination(
+    local_root: Option<PathBuf>,
+    sftp_host: Option<String>,
+    sftp_port: u16,
+    sftp_user: Option<String>,
+    sftp_key: Option<PathBuf>,
+    sftp_root: Option<String>,
+) -> anyhow::Result<Destination> {
+    if let Some(host) = sftp_host {
+        let username = sftp_user.ok_or_else(|| anyhow::anyhow!("--sftp-user is required"))?;
+        let key_path = sftp_key.ok_or_else(|| anyhow::anyhow!("--sftp-key is required"))?;
+        let remote_root = sftp_root.ok_or_else(|| anyhow::anyhow!("--sftp-root is required"))?;
+        Ok(Destination::Sftp {
+            host,
+            port: sftp_port,
+            username,
+            key_path,
+            remote_root,
+        })
+    } else {
+        Ok(Destination::Local {
+            root: local_root.ok_or_else(|| anyhow::anyhow!("--dest/--local-root is required"))?,
+        })
+    }
+}
+
+/// Opens a storage backend for a destination.
+fn open_backend(
+    destination: &Destination,
+    insecure_accept_any: bool,
+) -> anyhow::Result<std::sync::Arc<dyn rb_core::backend::StorageBackend>> {
+    match destination {
+        Destination::Local { root } => {
+            Ok(std::sync::Arc::new(rb_core::backend::LocalFs::new(root)))
         }
-    };
+        Destination::Sftp {
+            host,
+            port,
+            username,
+            key_path,
+            remote_root,
+        } => {
+            let known_hosts = Catalog::default_path()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("known_hosts")))
+                .unwrap_or_else(|| "known_hosts".into());
+            let policy = if insecure_accept_any {
+                rb_core::backend::HostKeyPolicy::AcceptAll
+            } else {
+                rb_core::backend::HostKeyPolicy::TrustOnFirstUse { known_hosts }
+            };
+            let backend = rb_core::backend::SftpBackend::connect(&rb_core::backend::SftpConnect {
+                host: host.clone(),
+                port: *port,
+                username: username.clone(),
+                key_path: key_path.clone(),
+                key_passphrase: std::env::var("RBACKUP_KEY_PASSPHRASE").ok(),
+                remote_root: remote_root.clone(),
+                host_key_policy: policy,
+            })
+            .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(std::sync::Arc::new(backend))
+        }
+    }
+}
+
+/// Opens the job's repository (local or SFTP destination).
+fn open_repo(
+    config: &JobConfig,
+    passphrase: &str,
+    insecure_accept_any: bool,
+) -> anyhow::Result<rb_core::repo::Repository> {
+    let backend = open_backend(&config.destination, insecure_accept_any)?;
     rb_core::repo::Repository::open(backend, passphrase).map_err(|e| anyhow::anyhow!(e))
 }
 
@@ -386,7 +505,7 @@ fn run_job(
     config: &JobConfig,
     passphrase: &str,
 ) -> anyhow::Result<(Uuid, rb_core::backup::BackupStats)> {
-    let repo = open_repo(config, passphrase)?;
+    let repo = open_repo(config, passphrase, false)?;
     let started = chrono_now();
     let mut files_done = 0u64;
 

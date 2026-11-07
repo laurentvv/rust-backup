@@ -162,3 +162,153 @@ fn open_backend(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Restore + verify + snapshot browsing bridges
+// ---------------------------------------------------------------------------
+
+/// A snapshot row for the restore browser.
+#[derive(Debug, Clone)]
+pub struct SnapshotRow {
+    /// Snapshot id.
+    pub id: Uuid,
+    /// Creation time (RFC 3339).
+    pub created_at: String,
+    /// Files captured.
+    pub files: usize,
+    /// Entries: (source root, relative path, size in bytes).
+    pub entries: Vec<(String, String, u64)>,
+}
+
+/// Loads the snapshots of a job's repository on a background thread.
+pub fn spawn_snapshots(
+    job: JobConfig,
+    passphrase: String,
+) -> Receiver<Result<Vec<SnapshotRow>, String>> {
+    let (tx, rx) = flume::bounded(1);
+    std::thread::spawn(move || {
+        let result = (|| {
+            let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
+            let repo = rb_core::repo::Repository::open(backend, &passphrase)
+                .map_err(|e| format!("ouverture du dépôt impossible : {e}"))?;
+            let mut rows = Vec::new();
+            for manifest in repo
+                .all_manifests()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|m| m.job_id == job.id)
+            {
+                let mut entries = Vec::new();
+                for (source, entry) in manifest.iter_files() {
+                    entries.push((
+                        source.root.to_string_lossy().to_string(),
+                        entry.path.to_string_lossy().replace('\\', "/"),
+                        entry.size,
+                    ));
+                }
+                rows.push(SnapshotRow {
+                    id: manifest.id,
+                    created_at: manifest.created_at.to_rfc3339(),
+                    files: manifest.file_count(),
+                    entries,
+                });
+            }
+            Ok(rows)
+        })();
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+/// Restore progress + outcome stream.
+pub enum RestoreEvent {
+    /// Live event from the restore engine.
+    Progress(rb_core::restore::RestoreEvent),
+    /// The restore finished (`Err` = user-facing message).
+    Finished(Result<rb_core::restore::RestoreStats, String>),
+}
+
+/// Runs a restore on a background thread.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_restore(
+    job: JobConfig,
+    passphrase: String,
+    snapshot_id: Uuid,
+    selection: Vec<rb_core::restore::RestoreSelection>,
+    destination: rb_core::restore::RestoreDestination,
+    overwrite: rb_core::restore::OverwritePolicy,
+) -> Receiver<RestoreEvent> {
+    let (tx, rx) = flume::unbounded();
+    std::thread::spawn(move || {
+        let result = (|| {
+            let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
+            let repo = rb_core::repo::Repository::open(backend, &passphrase)
+                .map_err(|e| format!("ouverture du dépôt impossible : {e}"))?;
+            rb_core::restore::restore(
+                &repo,
+                &snapshot_id,
+                &selection,
+                &destination,
+                &rb_core::restore::RestoreOptions {
+                    overwrite,
+                    cancel: None,
+                },
+                |event| {
+                    if tx.send(RestoreEvent::Progress(event)).is_err() {
+                        return Err(rb_core::Error::Cancelled);
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| e.to_string())
+        })();
+        let _ = tx.send(RestoreEvent::Finished(result));
+    });
+    rx
+}
+
+/// Runs a verification pass on a background thread; reports a summary line
+/// or an error message.
+pub fn spawn_verify(
+    job: JobConfig,
+    passphrase: String,
+    full: bool,
+) -> Receiver<Result<String, String>> {
+    let (tx, rx) = flume::bounded(1);
+    std::thread::spawn(move || {
+        let result = (|| {
+            let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
+            let repo = rb_core::repo::Repository::open(backend, &passphrase)
+                .map_err(|e| format!("ouverture du dépôt impossible : {e}"))?;
+            let mode = if full {
+                rb_core::verify::VerifyMode::Full
+            } else {
+                rb_core::verify::VerifyMode::Quick
+            };
+            let report = rb_core::verify::verify(&repo, mode, None, |_, _| Ok(()))
+                .map_err(|e| e.to_string())?;
+            if let Ok(catalog) = Catalog::default_path()
+                .map_err(|e| e.to_string())
+                .and_then(|p| Catalog::open(&p).map_err(|e| e.to_string()))
+            {
+                let _ = catalog.insert_verify_result(&repo.describe(), &report);
+            }
+            let head = format!(
+                "{} [{}] — {} instantané(s), {} bloc(s), {} orphelin(s)",
+                if report.ok() { "OK" } else { "FAILED" },
+                report.mode.as_str(),
+                report.manifests_checked,
+                report.chunks_checked,
+                report.orphan_chunks
+            );
+            let issues: Vec<String> = report.issues.iter().map(|i| i.message.clone()).collect();
+            if issues.is_empty() {
+                Ok(head)
+            } else {
+                Ok(format!("{head}\n{}", issues.join("\n")))
+            }
+        })();
+        let _ = tx.send(result);
+    });
+    rx
+}

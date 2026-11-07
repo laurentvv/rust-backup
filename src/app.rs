@@ -33,6 +33,8 @@ pub enum Section {
     Jobs,
     /// Live run view.
     Run,
+    /// Restore browser.
+    Restore,
     /// Run history.
     History,
     /// Settings.
@@ -88,6 +90,17 @@ pub struct RustBackupApp {
     cancel: Option<Arc<AtomicBool>>,
 
     toast: Option<(bool, String)>, // (is_error, message)
+
+    // --- restore browser state ---
+    snapshots: Vec<runner::SnapshotRow>,
+    selected_snapshot: Option<Uuid>,
+    restore_search: gpui::Entity<InputState>,
+    restore_target: gpui::Entity<InputState>,
+    selected_paths: std::collections::BTreeSet<String>,
+    restore_to_original: bool,
+    restore_overwrite: bool,
+    restore_busy: bool,
+    restore_result: Option<(bool, String)>,
 }
 
 impl RustBackupApp {
@@ -114,6 +127,19 @@ impl RustBackupApp {
             run_current_file: String::new(),
             cancel: None,
             toast: None,
+            snapshots: Vec::new(),
+            selected_snapshot: None,
+            restore_search: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(crate::i18n::Lang::default().texts().search_files)
+            }),
+            restore_target: cx
+                .new(|cx| InputState::new(window, cx).placeholder(r"D:\Restauration")),
+            selected_paths: std::collections::BTreeSet::new(),
+            restore_to_original: false,
+            restore_overwrite: false,
+            restore_busy: false,
+            restore_result: None,
         };
         app.refresh_catalog();
         app
@@ -266,6 +292,180 @@ impl RustBackupApp {
         }
         self.cancel = None;
         cx.notify();
+    }
+
+    fn passphrase_or_form(&self, cx: &gpui::Context<Self>) -> String {
+        if self.passphrase.is_empty() {
+            self.form_passphrase.read(cx).value().to_string()
+        } else {
+            self.passphrase.clone()
+        }
+    }
+
+    fn load_snapshots(&mut self, cx: &mut gpui::Context<Self>) {
+        let t = self.texts();
+        let Some(job) = self.jobs.first().cloned() else {
+            return;
+        };
+        let passphrase = self.passphrase_or_form(cx);
+        if passphrase.is_empty() {
+            self.restore_result = Some((true, t.passphrase_needed.to_string()));
+            cx.notify();
+            return;
+        }
+        self.restore_busy = true;
+        cx.notify();
+        let rx = runner::spawn_snapshots(job, passphrase);
+        cx.spawn(async move |this, cx| {
+            if let Ok(rows) = rx.recv_async().await {
+                let _ = this.update(cx, |app, cx| {
+                    app.restore_busy = false;
+                    match rows {
+                        Ok(mut rows) => {
+                            rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                            app.selected_snapshot = rows.first().map(|r| r.id);
+                            app.selected_paths.clear();
+                            app.snapshots = rows;
+                        }
+                        Err(message) => app.restore_result = Some((true, message)),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn run_restore(&mut self, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let t = self.texts();
+        if self.restore_busy {
+            return;
+        }
+        let Some(job) = self.jobs.first().cloned() else {
+            return;
+        };
+        let passphrase = self.passphrase_or_form(cx);
+        if passphrase.is_empty() {
+            self.restore_result = Some((true, t.passphrase_needed.to_string()));
+            cx.notify();
+            return;
+        }
+        let Some(snapshot) = self
+            .snapshots
+            .iter()
+            .find(|s| Some(s.id) == self.selected_snapshot)
+        else {
+            return;
+        };
+        if self.selected_paths.is_empty() {
+            return;
+        }
+        let roots: std::collections::BTreeSet<String> = snapshot
+            .entries
+            .iter()
+            .map(|(root, _, _)| root.clone())
+            .collect();
+        let selection: Vec<rb_core::restore::RestoreSelection> = self
+            .selected_paths
+            .iter()
+            .flat_map(|rel| {
+                roots
+                    .iter()
+                    .map(move |root| rb_core::restore::RestoreSelection {
+                        source_root: root.clone().into(),
+                        rel_path: rel.clone().into(),
+                    })
+            })
+            .collect();
+        let destination = if self.restore_to_original {
+            rb_core::restore::RestoreDestination::Original
+        } else {
+            let target = self.restore_target.read(cx).value().to_string();
+            rb_core::restore::RestoreDestination::Target(target.into())
+        };
+        let overwrite = if self.restore_overwrite {
+            rb_core::restore::OverwritePolicy::Overwrite
+        } else {
+            rb_core::restore::OverwritePolicy::Skip
+        };
+
+        self.restore_busy = true;
+        self.restore_result = None;
+        cx.notify();
+        let rx = runner::spawn_restore(
+            job,
+            passphrase,
+            snapshot.id,
+            selection,
+            destination,
+            overwrite,
+        );
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv_async().await {
+                let Ok(()) = this.update(cx, |app, _cx| match event {
+                    runner::RestoreEvent::Progress(rb_core::restore::RestoreEvent::FileDone {
+                        ..
+                    }) => {}
+                    runner::RestoreEvent::Finished(Ok(stats)) => {
+                        app.restore_busy = false;
+                        app.restore_result = Some((
+                            false,
+                            format!(
+                                "{} ✓ {} fichiers, {} ignorés, {} répertoires",
+                                app.texts().restored,
+                                stats.files_restored,
+                                stats.files_skipped,
+                                stats.dirs_created
+                            ),
+                        ));
+                    }
+                    runner::RestoreEvent::Finished(Err(message)) => {
+                        app.restore_busy = false;
+                        app.restore_result =
+                            Some((true, format!("{} — {message}", app.texts().restore_failed)));
+                    }
+                    _ => {}
+                }) else {
+                    break;
+                };
+                let _ = this.update(cx, |_, cx| cx.notify());
+            }
+        })
+        .detach();
+    }
+
+    fn run_verify(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+        job_id: JobId,
+        full: bool,
+    ) {
+        let t = self.texts();
+        let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
+            return;
+        };
+        let passphrase = self.passphrase_or_form(cx);
+        if passphrase.is_empty() {
+            self.toast = Some((true, t.passphrase_needed.to_string()));
+            cx.notify();
+            return;
+        }
+        self.toast = Some((false, format!("{} …", t.verify)));
+        cx.notify();
+        let rx = runner::spawn_verify(job, passphrase, full);
+        cx.spawn(async move |this, cx| {
+            if let Ok(result) = rx.recv_async().await {
+                let _ = this.update(cx, |app, cx| {
+                    match result {
+                        Ok(summary) => app.toast = Some((false, summary)),
+                        Err(message) => app.toast = Some((true, message)),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn elapsed_seconds(&self) -> u64 {
@@ -502,6 +702,21 @@ impl RustBackupApp {
                             )
                             .child(
                                 Button::new(gpui::SharedString::new(format!(
+                                    "verify-{}",
+                                    job.id.simple()
+                                )))
+                                .ghost()
+                                .icon(IconName::ShieldCheck)
+                                .label(t.verify)
+                                .on_click(cx.listener({
+                                    let id = job.id;
+                                    move |this, _, window, cx| {
+                                        this.run_verify(window, cx, id, false);
+                                    }
+                                })),
+                            )
+                            .child(
+                                Button::new(gpui::SharedString::new(format!(
                                     "del-{}",
                                     job.id.simple()
                                 )))
@@ -686,6 +901,296 @@ impl RustBackupApp {
                                 .label(t.cancel)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.cancel_run(window, cx);
+                                })),
+                        ),
+                )
+            })
+    }
+
+    fn render_restore(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let t = self.texts();
+        let selected = self.selected_snapshot;
+
+        let snapshot_rows: Vec<AnyElement> = self
+            .snapshots
+            .iter()
+            .map(|row| {
+                let is_selected = Some(row.id) == selected;
+                let row_id = row.id;
+                h_flex()
+                    .id(gpui::SharedString::new(row.id.to_string()))
+                    .justify_between()
+                    .p_2()
+                    .rounded_md()
+                    .when(is_selected, |this| {
+                        this.border_1().border_color(cx.theme().primary)
+                    })
+                    .when(!is_selected, |this| {
+                        this.border_1().border_color(cx.theme().border)
+                    })
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(row.created_at.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .child(format!("{} fichiers", row.files)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.selected_snapshot = Some(row_id);
+                            this.selected_paths.clear();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let search = self
+            .restore_search
+            .read(cx)
+            .value()
+            .to_string()
+            .to_lowercase();
+        let files: Vec<&(String, String, u64)> = self
+            .snapshots
+            .iter()
+            .find(|s| Some(s.id) == selected)
+            .map(|s| {
+                s.entries
+                    .iter()
+                    .filter(|(_, rel, _)| search.is_empty() || rel.to_lowercase().contains(&search))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let file_rows: Vec<AnyElement> = files
+            .iter()
+            .map(|(_, rel, size)| {
+                let rel = rel.clone();
+                let size = *size;
+                let picked = self.selected_paths.contains(rel.as_str());
+                h_flex()
+                    .id(gpui::SharedString::new(rel.clone()))
+                    .gap_2()
+                    .p_1()
+                    .rounded_md()
+                    .when(picked, |this| this.bg(cx.theme().selection))
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .text_color(if picked {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(if picked {
+                                Icon::new(IconName::Check).into_any_element()
+                            } else {
+                                Icon::new(IconName::Square).into_any_element()
+                            }),
+                    )
+                    .child(div().flex_1().text_size(px(12.0)).child(rel.clone()))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::i18n::human_bytes(size)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            if this.selected_paths.contains(rel.as_str()) {
+                                this.selected_paths.remove(rel.as_str());
+                            } else {
+                                this.selected_paths.insert(rel.to_string());
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let banner = self.restore_result.clone().map(|(is_error, message)| {
+            let color = if is_error {
+                cx.theme().danger
+            } else {
+                cx.theme().success
+            };
+            div()
+                .p_3()
+                .rounded_lg()
+                .bg(color.opacity(0.12))
+                .border_1()
+                .border_color(color.opacity(0.4))
+                .text_size(px(13.0))
+                .child(message)
+        });
+
+        let all_selected = !files.is_empty()
+            && files
+                .iter()
+                .all(|(_, rel, _)| self.selected_paths.contains(rel.as_str()));
+
+        v_flex()
+            .gap_4()
+            .child(
+                div()
+                    .text_size(px(24.0))
+                    .text_color(cx.theme().foreground)
+                    .child(t.restore),
+            )
+            .when_some(banner, |this, b| this.child(b))
+            .child(
+                Button::new("reload-snapshots")
+                    .label(format!("{} (actualiser)", t.snapshots))
+                    .icon(IconName::RefreshCw)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.load_snapshots(cx);
+                    })),
+            )
+            .child(if self.snapshots.is_empty() {
+                div()
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(cx.theme().border)
+                    .text_size(px(13.0))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(t.no_snapshots)
+                    .into_any_element()
+            } else {
+                let mut snap_list = v_flex().gap_1();
+                for row in snapshot_rows {
+                    snap_list = snap_list.child(row);
+                }
+                snap_list.into_any_element()
+            })
+            .when(!self.snapshots.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(Input::new(&self.restore_search))
+                                .child(
+                                    Button::new("select-all")
+                                        .ghost()
+                                        .label(if all_selected { "∅" } else { t.select_all })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let files: Vec<String> = this
+                                                .snapshots
+                                                .iter()
+                                                .find(|s| Some(s.id) == this.selected_snapshot)
+                                                .map(|s| {
+                                                    s.entries
+                                                        .iter()
+                                                        .map(|(_, rel, _)| rel.clone())
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default();
+                                            if files
+                                                .iter()
+                                                .all(|rel| this.selected_paths.contains(rel))
+                                            {
+                                                for rel in files {
+                                                    this.selected_paths.remove(&rel);
+                                                }
+                                            } else {
+                                                for rel in files {
+                                                    this.selected_paths.insert(rel);
+                                                }
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!(
+                                    "{} {}",
+                                    self.selected_paths.len(),
+                                    t.selected_files
+                                )),
+                        )
+                        .child({
+                            let mut file_list = v_flex().gap_1();
+                            for row in file_rows {
+                                file_list = file_list.child(row);
+                            }
+                            file_list
+                                .id("restore-file-list")
+                                .max_h(px(340.0))
+                                .overflow_y_scroll()
+                        }),
+                )
+            })
+            .when(!self.snapshots.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .gap_2()
+                        .p_4()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().background)
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("dest-original")
+                                        .label(t.to_original)
+                                        .when(self.restore_to_original, |b| b.primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.restore_to_original = true;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("dest-target")
+                                        .label(t.to_target)
+                                        .when(!self.restore_to_original, |b| b.primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.restore_to_original = false;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .when(!self.restore_to_original, |this| {
+                            this.child(Input::new(&self.restore_target))
+                        })
+                        .child(
+                            Button::new("toggle-overwrite")
+                                .ghost()
+                                .when(self.restore_overwrite, |b| b.primary())
+                                .icon(if self.restore_overwrite {
+                                    IconName::Check
+                                } else {
+                                    IconName::Square
+                                })
+                                .label(t.overwrite_files)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.restore_overwrite = !this.restore_overwrite;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("restore-run")
+                                .primary()
+                                .icon(IconName::Download)
+                                .label(format!("{} ({})", t.restore_now, self.selected_paths.len()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.run_restore(window, cx);
                                 })),
                         ),
                 )
@@ -926,6 +1431,12 @@ impl gpui::Render for RustBackupApp {
                             active == Section::Run,
                         ))
                         .child(menu_item(
+                            t.restore,
+                            IconName::Archive,
+                            Section::Restore,
+                            active == Section::Restore,
+                        ))
+                        .child(menu_item(
                             t.history,
                             IconName::Clock,
                             Section::History,
@@ -952,6 +1463,7 @@ impl gpui::Render for RustBackupApp {
             Section::Dashboard => self.render_dashboard(cx).into_any_element(),
             Section::Jobs => self.render_jobs(cx).into_any_element(),
             Section::Run => self.render_run(cx).into_any_element(),
+            Section::Restore => self.render_restore(cx).into_any_element(),
             Section::History => self.render_history(cx).into_any_element(),
             Section::Settings => self.render_settings(cx).into_any_element(),
         };

@@ -85,6 +85,34 @@ pub struct Texts {
     pub no_history: &'static str,
     /// Title of the run section.
     pub run_title: &'static str,
+    /// Section: restore.
+    pub restore: &'static str,
+    /// Snapshot list heading.
+    pub snapshots: &'static str,
+    /// Search placeholder for the file browser.
+    pub search_files: &'static str,
+    /// Select all files.
+    pub select_all: &'static str,
+    /// Restore to the original location.
+    pub to_original: &'static str,
+    /// Restore under a chosen directory.
+    pub to_target: &'static str,
+    /// Overwrite existing files.
+    pub overwrite_files: &'static str,
+    /// Button: restore now.
+    pub restore_now: &'static str,
+    /// Success banner for restore.
+    pub restored: &'static str,
+    /// Failure banner for restore.
+    pub restore_failed: &'static str,
+    /// Empty snapshot list.
+    pub no_snapshots: &'static str,
+    /// Button: verify (quick).
+    pub verify: &'static str,
+    /// Files selected counter.
+    pub selected_files: &'static str,
+    /// Passphrase required hint.
+    pub passphrase_needed: &'static str,
 }
 
 /// French strings.
@@ -125,6 +153,20 @@ pub const FR: Texts = Texts {
     no_jobs: "Aucun job configuré — créez-en un ci-dessous.",
     no_history: "Aucune exécution enregistrée pour l'instant.",
     run_title: "Exécution en cours",
+    restore: "Restauration",
+    snapshots: "Instantanés",
+    search_files: "Rechercher un fichier…",
+    select_all: "Tout sélectionner",
+    to_original: "Emplacement d'origine",
+    to_target: "Dossier de destination",
+    overwrite_files: "Écraser les fichiers existants",
+    restore_now: "Restaurer la sélection",
+    restored: "Restauration terminée",
+    restore_failed: "Échec de la restauration",
+    no_snapshots: "Aucun instantané — lancez d'abord une sauvegarde (et définissez la phrase secrète dans Paramètres).",
+    verify: "Vérifier",
+    selected_files: "fichiers sélectionnés",
+    passphrase_needed: "Définissez la phrase secrète dans Paramètres.",
 };
 
 /// English strings.
@@ -165,6 +207,20 @@ pub const EN: Texts = Texts {
     no_jobs: "No job configured — create one below.",
     no_history: "No run recorded yet.",
     run_title: "Run in progress",
+    restore: "Restore",
+    snapshots: "Snapshots",
+    search_files: "Search a file…",
+    select_all: "Select all",
+    to_original: "Original location",
+    to_target: "Destination folder",
+    overwrite_files: "Overwrite existing files",
+    restore_now: "Restore selection",
+    restored: "Restore complete",
+    restore_failed: "Restore failed",
+    no_snapshots: "No snapshot yet — run a backup first (and set the passphrase in Settings).",
+    verify: "Verify",
+    selected_files: "files selected",
+    passphrase_needed: "Set the passphrase in Settings.",
 };
 
 impl Lang {

@@ -73,7 +73,9 @@ impl StorageBackend for LocalFs {
     }
 
     fn exists(&self, rel: &str) -> crate::Result<bool> {
-        Ok(self.resolve(rel).exists())
+        // `try_exists`, not `exists`: an I/O error (permission denied, device
+        // gone mid-call) must surface instead of reading as "absent".
+        Ok(self.resolve(rel).try_exists()?)
     }
 
     fn mkdirs(&self, rel: &str) -> crate::Result<()> {

@@ -44,9 +44,14 @@ pub trait StorageBackend: Send + Sync {
 
     /// Whether a repository file exists.
     ///
+    /// `Ok(false)` ONLY when the backend definitively reports the file as
+    /// absent; callers rely on this to never mistake an outage for an empty
+    /// destination (no implicit repository creation).
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`](crate::Error::Io) when the check itself fails.
+    /// Returns an error when the check itself fails (I/O error, permission
+    /// denied, dropped SFTP connection, timeout).
     fn exists(&self, rel: &str) -> crate::Result<bool>;
 
     /// Creates a directory (and parents) relative to the repository root.

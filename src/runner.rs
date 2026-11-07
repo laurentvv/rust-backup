@@ -17,6 +17,29 @@ pub enum EngineEvent {
     Progress(BackupEvent),
     /// The run finished (`Err` = user-facing error message).
     Finished(Result<BackupSummary, String>),
+    /// The destination is reachable but holds no repository. Nothing was
+    /// written: the user must confirm an explicit initialization first.
+    RepositoryMissing {
+        /// Job whose destination is empty.
+        job_id: rb_core::domain::JobId,
+        /// Human-readable destination (`local: E:\...`, `sftp: host:/path`).
+        destination: String,
+    },
+}
+
+/// Why a backup run did not produce a snapshot.
+#[derive(Debug)]
+enum RunError {
+    /// No `config.json` at a reachable destination.
+    RepositoryMissing { destination: String },
+    /// Any other failure (user-facing message).
+    Failed(String),
+}
+
+impl From<rb_core::Error> for RunError {
+    fn from(err: rb_core::Error) -> Self {
+        Self::Failed(err.to_string())
+    }
 }
 
 /// What a successful run produced.
@@ -55,7 +78,18 @@ struct BackupRunner {
 impl BackupRunner {
     fn execute(self, job: JobConfig, passphrase: String) {
         let started = chrono::Utc::now();
-        let result = self.run(&job, &passphrase);
+        let result = match self.run(&job, &passphrase) {
+            Ok(done) => Ok(done),
+            // Not a run: nothing is recorded, the UI asks for confirmation.
+            Err(RunError::RepositoryMissing { destination }) => {
+                let _ = self.tx.send(EngineEvent::RepositoryMissing {
+                    job_id: job.id,
+                    destination,
+                });
+                return;
+            }
+            Err(RunError::Failed(message)) => Err(message),
+        };
         let finished = chrono::Utc::now();
 
         // Record the outcome in the local catalog (best effort — the
@@ -116,25 +150,18 @@ impl BackupRunner {
             })));
     }
 
-    fn run(&self, job: &JobConfig, passphrase: &str) -> Result<(Uuid, BackupStats), String> {
-        let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
-        let repo = match rb_core::repo::Repository::open(Arc::clone(&backend), passphrase) {
-            Ok(r) => r,
-            Err(e) => {
-                if !backend.exists("config.json").unwrap_or(false) {
-                    rb_core::repo::Repository::init(
-                        backend,
-                        passphrase,
-                        rb_core::chunker::ChunkerConfig::default(),
-                        job.compression_level,
-                        rb_core::crypto::KdfParams::default(),
-                    )
-                    .map_err(|init_err| format!("Auto-init failed: {init_err}"))?
-                } else {
-                    return Err(e.to_string());
-                }
-            }
-        };
+    fn run(&self, job: &JobConfig, passphrase: &str) -> Result<(Uuid, BackupStats), RunError> {
+        let backend = open_backend(&job.destination)?;
+        // Never create a repository implicitly: an unplugged USB disk whose
+        // letter now points elsewhere, or a transient I/O error, must not
+        // silently start a fresh repository. A probe error propagates as a
+        // failure; only a clean "absent" asks the user to confirm an init.
+        if !backend.exists("config.json")? {
+            return Err(RunError::RepositoryMissing {
+                destination: backend.describe(),
+            });
+        }
+        let repo = rb_core::repo::Repository::open(backend, passphrase)?;
         let tx = self.tx.clone();
         let (manifest, stats) = run_backup(
             &repo,
@@ -150,8 +177,7 @@ impl BackupRunner {
                 }
                 Ok(())
             },
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         Ok((manifest.id, stats))
     }
 }
@@ -512,6 +538,70 @@ mod tests {
     fn open(job: &JobConfig) -> Repository {
         Repository::open(open_backend(&job.destination).expect("backend"), PASSPHRASE)
             .expect("repo open")
+    }
+
+    /// A job whose destination has no repository; `dest_exists` simulates an
+    /// empty folder (true) or an unplugged disk / missing folder (false).
+    fn job_without_repo(tag: &str, dest_exists: bool) -> (PathBuf, PathBuf, JobConfig) {
+        let base = std::env::temp_dir().join(format!("rb-runner-{tag}-{}", Uuid::new_v4()));
+        let source = base.join("src");
+        let dest = base.join("dest");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::write(source.join("a.txt"), b"data").expect("a.txt");
+        if dest_exists {
+            std::fs::create_dir_all(&dest).expect("dest dir");
+        }
+        let job = JobConfig {
+            id: JobId::new_v4(),
+            name: format!("runner-{tag}"),
+            sources: vec![source],
+            destination: Destination::Local { root: dest.clone() },
+            compression_level: 3,
+            excludes: vec![],
+            max_incrementals: 10,
+            created_at: chrono::Utc::now(),
+        };
+        (base, dest, job)
+    }
+
+    /// Runs the backup logic in-thread (no catalog access).
+    fn run_without_catalog(job: &JobConfig) -> Result<(Uuid, BackupStats), RunError> {
+        let (tx, _rx) = flume::unbounded();
+        BackupRunner {
+            tx,
+            cancel: Arc::new(AtomicBool::new(false)),
+            force_kind: None,
+        }
+        .run(job, PASSPHRASE)
+    }
+
+    #[test]
+    fn run_on_empty_destination_never_creates_a_repository() {
+        let (base, dest, job) = job_without_repo("empty-dest", true);
+
+        let outcome = run_without_catalog(&job);
+
+        assert!(
+            matches!(outcome, Err(RunError::RepositoryMissing { .. })),
+            "expected RepositoryMissing, got {outcome:?}"
+        );
+        let written: Vec<_> = std::fs::read_dir(&dest).expect("dest").collect();
+        assert!(written.is_empty(), "nothing may be written: {written:?}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn run_on_missing_destination_folder_never_creates_it() {
+        let (base, dest, job) = job_without_repo("missing-dest", false);
+
+        let outcome = run_without_catalog(&job);
+
+        assert!(
+            matches!(outcome, Err(RunError::RepositoryMissing { .. })),
+            "expected RepositoryMissing, got {outcome:?}"
+        );
+        assert!(!dest.exists(), "the destination folder must not be created");
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

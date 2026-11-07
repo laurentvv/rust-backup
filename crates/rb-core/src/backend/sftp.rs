@@ -176,8 +176,19 @@ impl StorageBackend for SftpBackend {
     fn exists(&self, rel: &str) -> crate::Result<bool> {
         let path = self.remote_path(rel);
         let sftp = Arc::clone(&self.sftp);
-        self.runtime
-            .block_on(async move { Ok(sftp.metadata(&path).await.is_ok()) })
+        self.runtime.block_on(async move {
+            match sftp.metadata(&path).await {
+                Ok(_) => Ok(true),
+                // Only a definite "no such file" means absent; a dropped
+                // connection or timeout must not read as "absent".
+                Err(russh_sftp::client::error::Error::Status(status))
+                    if status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile =>
+                {
+                    Ok(false)
+                }
+                Err(err) => Err(err.into()),
+            }
+        })
     }
 
     fn mkdirs(&self, rel: &str) -> crate::Result<()> {

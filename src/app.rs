@@ -84,6 +84,14 @@ pub enum RunPhase {
     },
     /// Run was cancelled by the user.
     Cancelled,
+    /// The destination holds no repository: nothing was written, the user
+    /// must explicitly confirm creating one.
+    NeedsInit {
+        /// Job to initialize, then back up.
+        job_id: JobId,
+        /// Human-readable destination shown in the confirmation.
+        destination: String,
+    },
 }
 
 /// History section tabs.
@@ -390,12 +398,7 @@ impl RustBackupApp {
         }
     }
 
-    fn start_backup(
-        &mut self,
-        _window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-        job_id: JobId,
-    ) {
+    fn start_backup(&mut self, cx: &mut gpui::Context<Self>, job_id: JobId) {
         let t = self.texts();
         if let RunPhase::Running { .. } = self.phase {
             self.toast = Some((true, format!("{} ({})", t.running, t.run_title)));
@@ -489,6 +492,16 @@ impl RustBackupApp {
                 self.run_chunks_new = summary.stats.chunks_new;
                 self.run_bytes_new = summary.stats.bytes_new;
                 self.refresh_catalog();
+            }
+            EngineEvent::RepositoryMissing {
+                job_id,
+                destination,
+            } => {
+                self.cancel = None;
+                self.phase = RunPhase::NeedsInit {
+                    job_id,
+                    destination,
+                };
             }
             EngineEvent::Finished(Err(message)) => {
                 self.cancel = None;
@@ -1039,12 +1052,10 @@ impl RustBackupApp {
         cx.notify();
     }
 
-    fn init_job_repo(
-        &mut self,
-        _window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-        job_id: JobId,
-    ) {
+    /// Explicitly initializes the job's repository; with `then_backup`, the
+    /// backup starts as soon as the repository exists (confirmed init from
+    /// the Run page).
+    fn init_job_repo(&mut self, cx: &mut gpui::Context<Self>, job_id: JobId, then_backup: bool) {
         let t = self.texts();
         let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
             return;
@@ -1065,6 +1076,10 @@ impl RustBackupApp {
                         Ok(msg) => {
                             app.toast =
                                 Some((false, format!("{} ✓ {msg}", app.texts().repo_initialized)));
+                            if then_backup {
+                                app.phase = RunPhase::Idle;
+                                app.start_backup(cx, job_id);
+                            }
                         }
                         Err(err) => app.toast = Some((true, err)),
                     }
@@ -1577,8 +1592,8 @@ impl RustBackupApp {
                                     .primary()
                                     .label(t.run_now)
                                     .icon(IconName::Play)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.start_backup(window, cx, id);
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.start_backup(cx, id);
                                     })),
                                 )
                                 .child(
@@ -1625,8 +1640,8 @@ impl RustBackupApp {
                                     .ghost()
                                     .icon(IconName::Sparkles)
                                     .label(t.init_repo)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.init_job_repo(window, cx, id);
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.init_job_repo(cx, id, false);
                                     })),
                                 )
                                 .child(
@@ -2067,6 +2082,17 @@ impl RustBackupApp {
                 t.run.to_string(),
                 Some((cx.theme().warning, t.cancelled_by_user.to_string())),
             ),
+            RunPhase::NeedsInit { destination, .. } => (
+                t.run.to_string(),
+                Some((
+                    cx.theme().warning,
+                    format!("{} — {destination}", t.repo_missing),
+                )),
+            ),
+        };
+        let init_prompt = match &self.phase {
+            RunPhase::NeedsInit { job_id, .. } => Some(*job_id),
+            _ => None,
         };
 
         let running = matches!(self.phase, RunPhase::Running { .. });
@@ -2208,6 +2234,44 @@ impl RustBackupApp {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.cancel_run(window, cx);
                                 })),
+                        ),
+                )
+            })
+            .when_some(init_prompt, |this, job_id| {
+                // Explicit consent: a repository is only ever created here or
+                // from the job's "Initialize repository" action.
+                this.child(
+                    v_flex()
+                        .gap_2()
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(cx.theme().warning)
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(t.repo_missing_desc),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("init-and-backup")
+                                        .primary()
+                                        .label(t.init_and_backup)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.init_job_repo(cx, job_id, true);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("init-cancel").ghost().label(t.cancel).on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.phase = RunPhase::Idle;
+                                            cx.notify();
+                                        }),
+                                    ),
+                                ),
                         ),
                 )
             })

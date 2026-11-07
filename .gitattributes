@@ -1,0 +1,6 @@
+# agents-kit fleet pins: byte-stable skills installs (lesson 2026-10-16),
+# CRLF Windows launchers byte-exact (lesson 2026-10-31)
+.agents/skills/** text eol=lf
+*.cmd -text
+*.bat -text
+.agent/*.duckdb* binary

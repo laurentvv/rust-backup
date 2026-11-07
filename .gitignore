@@ -1,0 +1,5 @@
+# Agent local state (ledger, installed skills) - kept on disk, never committed
+.agent/
+.agents/
+/target
+.tgrep/

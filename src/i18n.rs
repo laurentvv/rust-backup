@@ -224,6 +224,10 @@ pub struct Texts {
     pub pruning: &'static str,
     /// Prune complete.
     pub prune_done: &'static str,
+    /// Prune confirmation dialog title.
+    pub confirm_prune: &'static str,
+    /// Prune confirmation dialog description.
+    pub confirm_prune_desc: &'static str,
     /// Delete snapshot.
     pub delete_snapshot: &'static str,
     /// Confirm delete snapshot.
@@ -353,6 +357,8 @@ pub const FR: Texts = Texts {
     prune: "Nettoyer l'espace (Prune)",
     pruning: "Nettoyage en cours…",
     prune_done: "Nettoyage terminé",
+    confirm_prune: "Nettoyer le dépôt",
+    confirm_prune_desc: "Supprimer définitivement de la destination les blocs qui ne sont plus référencés par aucun instantané ? Les instantanés existants restent intacts ; l'espace libéré ne peut pas être récupéré.",
     delete_snapshot: "Supprimer",
     confirm_delete_snapshot: "Supprimer l'instantané",
     confirm_delete_snapshot_desc: "Supprimer définitivement cet instantané ? Ses données uniques pourront être purgées lors du nettoyage.",
@@ -472,6 +478,8 @@ pub const EN: Texts = Texts {
     prune: "Prune storage",
     pruning: "Pruning in progress…",
     prune_done: "Prune complete",
+    confirm_prune: "Prune repository",
+    confirm_prune_desc: "Permanently delete from the destination the chunks no snapshot references anymore? Existing snapshots stay intact; freed data cannot be recovered.",
     delete_snapshot: "Delete",
     confirm_delete_snapshot: "Delete snapshot",
     confirm_delete_snapshot_desc: "Permanently delete this snapshot? Unique chunks will be reclaimed on next prune.",

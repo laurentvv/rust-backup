@@ -427,11 +427,7 @@ pub fn spawn_delete_snapshot(
     let (tx, rx) = flume::bounded(1);
     std::thread::spawn(move || {
         let result = (|| {
-            let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
-            let repo =
-                rb_core::repo::Repository::open(backend, &passphrase).map_err(|e| e.to_string())?;
-            repo.delete_snapshot(&snapshot_id)
-                .map_err(|e| e.to_string())?;
+            delete_snapshot_in_repo(&job, &passphrase, &snapshot_id)?;
             if let Ok(catalog) = Catalog::default_path()
                 .map_err(|e| e.to_string())
                 .and_then(|p| Catalog::open(&p).map_err(|e| e.to_string()))
@@ -443,4 +439,127 @@ pub fn spawn_delete_snapshot(
         let _ = tx.send(result);
     });
     rx
+}
+
+/// Repository side of a snapshot deletion: opens the job's repository with the
+/// given passphrase and removes the snapshot manifest.
+fn delete_snapshot_in_repo(
+    job: &JobConfig,
+    passphrase: &str,
+    snapshot_id: &Uuid,
+) -> Result<(), String> {
+    let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
+    let repo = rb_core::repo::Repository::open(backend, passphrase).map_err(|e| e.to_string())?;
+    repo.delete_snapshot(snapshot_id).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use rb_core::backend::{LocalFs, StorageBackend};
+    use rb_core::chunker::ChunkerConfig;
+    use rb_core::crypto::KdfParams;
+    use rb_core::domain::JobId;
+    use rb_core::repo::Repository;
+    use std::path::PathBuf;
+
+    const PASSPHRASE: &str = "runner test passphrase";
+
+    struct Fixture {
+        base: PathBuf,
+        job: JobConfig,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// A local repository holding two snapshots of a small source tree.
+    fn fixture(tag: &str) -> Fixture {
+        let base = std::env::temp_dir().join(format!("rb-runner-{tag}-{}", Uuid::new_v4()));
+        let source = base.join("src");
+        let dest = base.join("repo");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::write(source.join("a.txt"), b"first version\n".repeat(64)).expect("a.txt");
+
+        let job = JobConfig {
+            id: JobId::new_v4(),
+            name: format!("runner-{tag}"),
+            sources: vec![source.clone()],
+            destination: Destination::Local { root: dest.clone() },
+            compression_level: 3,
+            excludes: vec![],
+            max_incrementals: 10,
+            created_at: chrono::Utc::now(),
+        };
+        let backend: Arc<dyn StorageBackend> = Arc::new(LocalFs::new(&dest));
+        let fast_kdf = KdfParams {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let repo = Repository::init(backend, PASSPHRASE, ChunkerConfig::default(), 3, fast_kdf)
+            .expect("repo init");
+        run_backup(&repo, &job, &BackupOptions::default(), |_| Ok(())).expect("backup 1");
+        std::fs::write(source.join("a.txt"), b"second version\n".repeat(64)).expect("a.txt v2");
+        run_backup(&repo, &job, &BackupOptions::default(), |_| Ok(())).expect("backup 2");
+        Fixture { base, job }
+    }
+
+    fn open(job: &JobConfig) -> Repository {
+        Repository::open(open_backend(&job.destination).expect("backend"), PASSPHRASE)
+            .expect("repo open")
+    }
+
+    #[test]
+    fn delete_snapshot_with_settings_passphrase_removes_only_that_snapshot() {
+        let fx = fixture("delete");
+        let ids = open(&fx.job).list_snapshot_ids().expect("ids");
+        assert_eq!(ids.len(), 2);
+
+        delete_snapshot_in_repo(&fx.job, PASSPHRASE, &ids[0]).expect("delete succeeds");
+
+        let left = open(&fx.job).list_snapshot_ids().expect("ids after");
+        assert_eq!(left, vec![ids[1]]);
+    }
+
+    #[test]
+    fn delete_snapshot_with_empty_passphrase_is_refused() {
+        let fx = fixture("delete-empty");
+        let ids = open(&fx.job).list_snapshot_ids().expect("ids");
+
+        assert!(delete_snapshot_in_repo(&fx.job, "", &ids[0]).is_err());
+        assert_eq!(open(&fx.job).list_snapshot_ids().expect("ids").len(), 2);
+    }
+
+    #[test]
+    fn spawn_prune_with_settings_passphrase_reclaims_orphans() {
+        let fx = fixture("prune");
+        let ids = open(&fx.job).list_snapshot_ids().expect("ids");
+        delete_snapshot_in_repo(&fx.job, PASSPHRASE, &ids[0]).expect("delete");
+
+        let (rx, _cancel) = spawn_prune(fx.job.clone(), PASSPHRASE.to_string());
+        let report = loop {
+            match rx.recv().expect("prune event") {
+                PruneEvent::Progress { .. } => {}
+                PruneEvent::Finished(result) => break result.expect("prune succeeds"),
+            }
+        };
+        assert!(
+            report.chunks_deleted > 0,
+            "first version's chunk is orphaned"
+        );
+        // The remaining snapshot is still fully readable.
+        let repo = open(&fx.job);
+        for manifest in repo.all_manifests().expect("manifests") {
+            for (_, entry) in manifest.iter_files() {
+                for chunk in &entry.chunks {
+                    assert!(repo.read_chunk(&chunk.hash, chunk.plain_len).is_ok());
+                }
+            }
+        }
+    }
 }

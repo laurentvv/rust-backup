@@ -82,12 +82,12 @@ The dependency (`duckdb>=1.1.0`) is declared inside the script (PEP 723): uv bui
 
 ### Mission / scope
 
-Desktop backup application for Windows, written in Rust with a GPU-accelerated native GUI on GPUI Kit (Zed's GPUI engine + Longbridge's component library, exact-pinned 0.7.3). Scope: configure backup jobs (sources → destination), run them with progress reporting, browse job history and logs. Out of scope (for now): cloud targets, scheduler daemon, file synchronization.
+Desktop backup application for Windows ("RustBackup"), written in Rust with a GPU-accelerated native GUI on GPUI Kit (Zed's GPUI engine + Longbridge's component library, exact-pinned 0.9.0). Scope: encrypted+compressed dedup backups (full then incremental) to USB disks or remote Linux servers over SFTP (public key), partial restore (files/dirs to original or chosen location), DuckDB local tracking catalog, integrity verification. Out of scope (for now): cloud targets, scheduler daemon, file synchronization, VSS.
 
 ### Declared locations (deviations from the common block)
 - Ledger: `.agent/state.duckdb` via the agent-state skill (default); created empty at onboarding 2026-11-07, no legacy migration
 - Machine / shell: Windows 11 + Git Bash (default from §1); Rust toolchain 1.99.1, host `x86_64-pc-windows-msvc`
-- GUI stack: gpui-kit 0.7.3 exact pin — bootstrap recipe verified live on this machine 2026-10-18 (see `.agents/skills/gpui-kit/SKILL.md`); GPUI prerequisites verified at onboarding 2026-11-07: VS 18 Community + VC tools x86/x64, CMake 4.4.5
+- GUI stack: gpui-kit 0.9.0 exact pin — workspace build re-verified live on this machine 2026-11-07 (previous: 0.7.3 recipe verified 2026-10-18; see `.agents/skills/gpui-kit/SKILL.md`); GPUI prerequisites verified at onboarding 2026-11-07: VS 18 Community + VC tools x86/x64, CMake 4.4.5; upstream docs pinned in `.agent/scratch/upstream-docs/`
 - CI: none (canon v3.3 — no GitHub Actions workflows; validation runs locally through the §3 gate below)
 
 ### Key commands
@@ -95,28 +95,31 @@ Desktop backup application for Windows, written in Rust with a GPU-accelerated n
 # state ledger (canon §2)
 uv run --no-project .agents/skills/agent-state/scripts/state_agents.py bootstrap
 # §3 gate (local only — canon v3.3 forbids GitHub Actions CI): fmt + clippy + tests
+# (--workspace is MANDATORY: the root package is the default member otherwise)
 cargo fmt --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --locked
 # build / run (the run command opens the GUI window)
-cargo build --locked
+cargo build --workspace --locked
 cargo run --locked
 # large repositories (>5k files): fast indexed code search with tgrep (on PATH; index dir `.tgrep/` stays git-ignored)
 ```
 
 ### Business invariants (never break)
 
-- **gpui-kit exact pin**: `gpui-kit = "=0.7.3"` — 0.x API drifts between minor versions; bump only after re-reading the docs page for the new version. NEVER add `gpui` or `gpui-pre` as a direct dependency — everything arrives through `gpui_kit::*`.
+- **gpui-kit exact pin**: `gpui-kit = "=0.9.0"` — 0.x API drifts between minor versions; bump only after re-reading the docs page for the new version. NEVER add `gpui` or `gpui-pre` as a direct dependency — everything arrives through `gpui_kit::*`.
 - **GPUI wiring**: call `init(cx)` exactly once before opening any window; return the content view from `open_window`, never a nested Root (overlay layers break).
 - **Error handling** (rust-best-practices): no `unwrap()`/`expect()` outside tests; `thiserror` in library modules, `anyhow` only in the binary; `?` over match chains.
 - **Backup domain — no source destruction**: the app NEVER deletes or overwrites source data; destructive pruning only ever targets the backup destination, behind an explicit user confirmation in the UI.
 - **Atomic backup runs**: a run writes into a staging directory and is finalized (renamed into place) only after full success — a partial run must never look like a complete backup.
 
 ### Pitfalls & lessons (dated format)
+- **[2026-11-07] root-package workspace trap** — in a Cargo workspace whose root is also a package, `cargo build`/`test`/`clippy` default to the ROOT PACKAGE ONLY; the §3 gate and every verification MUST pass `--workspace` (bit us: clippy looked green while rb-core/rb-cli were never linted).
+- **[2026-11-07] gpui-kit 0.7.3 → 0.9.0 bump** — verified: same bootstrap recipe; breaking changes: theme structs now `#[non_exhaustive]` (build via `Default::default()` + field assignment), `PlatformInput::ScrollWheel`→`Scroll`, modifier helpers need `&App` (full notes in the gpui-kit skill).
 - **[2026-11-07] onboarding** — repo scaffolded empty via `sync_agents.py init` (AGENTS.md v3.3 + DuckDB ledger + git init -b main + fleet `.gitattributes` pins: `.agents/skills/** text eol=lf`, `.agent/*.duckdb* binary`); initial commit deliberately left to the user's decision.
 - **[2026-11-07] onboarding** — gpui-kit 0.7.3 recipe is compile-verified on this exact machine (Windows 11 + Git Bash, 2026-10-18, 798 locked packages ~50 s cold): follow `.agents/skills/gpui-kit/SKILL.md` verbatim before "fixing" compile errors from memory.
 - **[2026-11-07] scope discipline** — "initialize" means scaffold only (manifest, pinned deps, structure, fleet wiring): no application code and no launched GUI window unless explicitly requested. The bootstrap `main.rs` written at onboarding was reverted to the bare cargo template on user request; write real app code only on a stated feature task.
 
 ### References
-- GUI: `.agents/skills/gpui-kit/SKILL.md` (pinned recipe, verified 2026-10-18) — official docs https://gpui-kit.com/docs (v0.7.3), full-text agent dump https://gpui-kit.com/llms-full.txt, component list https://gpui-kit.com/component
+- GUI: `.agents/skills/gpui-kit/SKILL.md` (pinned recipe, re-verified 2026-11-07 for 0.9.0) — official docs https://gpui-kit.com/docs, full-text agent dump https://gpui-kit.com/llms-full.txt (copy pinned in `.agent/scratch/upstream-docs/gpui-kit-0.9.0/`), component list https://gpui-kit.com/component
 - Rust practices: `.agents/skills/rust-best-practices/` (Apollo handbook), `.agents/skills/rust-review/`, `.agents/skills/rust-refactoring/` — `rust-port` also available in the kit if a codebase port ever becomes relevant

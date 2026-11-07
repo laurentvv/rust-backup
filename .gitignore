@@ -3,3 +3,4 @@
 .agents/
 /target
 .tgrep/
+.zcode/

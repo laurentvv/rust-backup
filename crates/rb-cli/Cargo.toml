@@ -1,0 +1,15 @@
+[package]
+name = "rb-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rbackup"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+rb-core = { path = "../rb-core" }
+uuid.workspace = true

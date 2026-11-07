@@ -43,6 +43,10 @@ pub enum Error {
     #[error("cancelled by user")]
     Cancelled,
 
+    /// The repository is locked by another operation.
+    #[error("repository is locked: {0}")]
+    RepositoryLocked(String),
+
     /// The repository format is violated (bad magic, unsupported version,
     /// inconsistent metadata).
     #[error("repository format error: {0}")]

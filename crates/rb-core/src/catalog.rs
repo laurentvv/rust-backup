@@ -366,6 +366,19 @@ impl Catalog {
         Ok(())
     }
 
+    /// Deletes a cached snapshot record by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Catalog`] on database errors.
+    pub fn delete_snapshot(&self, snapshot_id: crate::domain::SnapshotId) -> crate::Result<bool> {
+        let rows = self.conn.execute(
+            "DELETE FROM snapshots WHERE id = ?",
+            duckdb::params![snapshot_id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Lists cached snapshots of a job, newest first.
     ///
     /// # Errors
@@ -633,6 +646,11 @@ mod tests {
         assert_eq!(snapshots[0].id, second, "newest first");
         assert_eq!(snapshots[0].files_total, 15);
         assert_eq!(snapshots[1].bytes_total, 34_000);
+
+        assert!(catalog.delete_snapshot(second).expect("delete snapshot"));
+        let remaining = catalog.list_snapshots(job.id).expect("list snapshots");
+        assert_eq!(remaining.len(), 1);
+        assert_ne!(remaining[0].id, second);
 
         let report = {
             let mut r = crate::verify::VerifyReport {

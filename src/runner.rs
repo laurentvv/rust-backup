@@ -368,3 +368,67 @@ pub fn spawn_verify(
     });
     (rx, cancel)
 }
+
+/// Prune event stream.
+#[allow(dead_code)]
+pub enum PruneEvent {
+    /// Progress event: checked chunks so far and total chunks.
+    Progress {
+        /// Chunks checked so far.
+        current: u64,
+        /// Total chunks to check.
+        total: u64,
+    },
+    /// The prune finished (`Err` = user-facing error message).
+    Finished(Result<rb_core::repo::PruneReport, String>),
+}
+
+/// Runs orphan chunk pruning on a background thread.
+pub fn spawn_prune(job: JobConfig, passphrase: String) -> (Receiver<PruneEvent>, Arc<AtomicBool>) {
+    let (tx, rx) = flume::unbounded();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_worker = Arc::clone(&cancel);
+    let tx_worker = tx.clone();
+    std::thread::spawn(move || {
+        let result = (|| {
+            let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
+            let repo =
+                rb_core::repo::Repository::open(backend, &passphrase).map_err(|e| e.to_string())?;
+            let report = repo
+                .prune_orphans(Some(&cancel_worker), |current, total| {
+                    let _ = tx_worker.send(PruneEvent::Progress { current, total });
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(report)
+        })();
+        let _ = tx.send(PruneEvent::Finished(result));
+    });
+    (rx, cancel)
+}
+
+/// Deletes a snapshot in the repository and local catalog on a background thread.
+pub fn spawn_delete_snapshot(
+    job: JobConfig,
+    passphrase: String,
+    snapshot_id: Uuid,
+) -> Receiver<Result<(), String>> {
+    let (tx, rx) = flume::bounded(1);
+    std::thread::spawn(move || {
+        let result = (|| {
+            let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
+            let repo =
+                rb_core::repo::Repository::open(backend, &passphrase).map_err(|e| e.to_string())?;
+            repo.delete_snapshot(&snapshot_id)
+                .map_err(|e| e.to_string())?;
+            if let Ok(catalog) = Catalog::default_path()
+                .map_err(|e| e.to_string())
+                .and_then(|p| Catalog::open(&p).map_err(|e| e.to_string()))
+            {
+                let _ = catalog.delete_snapshot(snapshot_id);
+            }
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    });
+    rx
+}

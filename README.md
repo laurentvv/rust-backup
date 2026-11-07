@@ -65,24 +65,19 @@ Whether backing up directly to external USB drives, local NVMe volumes, or offsi
 
 ## 🖼️ Application Preview
 
-> [!NOTE]
-> **Interface Showcase in Progress**: High-resolution screenshots and animated workflow GIFs will be embedded here upon finalization of the user interface revamp.
+<p align="center">
+  <img src="assets/screenshots/rustbackup-walkthrough.gif" alt="RustBackup Native GPUI Walkthrough" width="90%" />
+</p>
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  RustBackup — Encrypted, deduplicated backups                          │
-├───────────────┬────────────────────────────────────────────────────────┤
-│ ❖ RustBackup  │ Dashboard                                              │
-│               │                                                        │
-│ ▤ Dashboard   │  ┌──────────────┐ ┌──────────────┐ ┌────────────────┐  │
-│ 🗄 Backups    │  │ Jobs: 2      │ │ Snaps: 5     │ │ Volume: 205 MB │  │
-│ ▷ Run Live    │  └──────────────┘ └──────────────┘ └────────────────┘  │
-│ 🗃 Restore    │                                                        │
-│ 🕒 History    │  Protected Volume History                              │
-│ ⚙ Settings    │  git-repo  [================================] 205.9 MB │
-│               │  documents [========================] 120.4 MB         │
-└───────────────┴────────────────────────────────────────────────────────┘
-```
+### 📸 Native GPUI Interface Views
+
+| **Dashboard (Protected Volumes & Stats)** | **Backup Jobs & Destination Config** |
+| :---: | :---: |
+| ![Dashboard](assets/screenshots/01-dashboard.png) | ![Jobs](assets/screenshots/02-jobs.png) |
+| **Granular Restore & Prune Maintenance** | **Execution & Verification History** |
+| ![Restore](assets/screenshots/04-restore.png) | ![History](assets/screenshots/05-history.png) |
+| **Settings & Bilingual Switch (FR/EN)** | **Dark Mode & Hardware Acceleration** |
+| ![Settings](assets/screenshots/06-settings.png) | ![Dark Mode](assets/screenshots/08-dashboard-dark.png) |
 
 ---
 

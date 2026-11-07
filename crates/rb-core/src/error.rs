@@ -22,6 +22,22 @@ pub enum Error {
     /// The platform provided no local application-data directory.
     #[error("no platform app-data directory available")]
     NoAppDataDir,
+
+    /// A chunker configuration is invalid.
+    #[error("invalid chunker configuration: {0}")]
+    InvalidChunker(String),
+
+    /// A hash string could not be parsed.
+    #[error("invalid hash: {0}")]
+    InvalidHash(String),
+
+    /// A compression operation failed.
+    #[error("compression error: {0}")]
+    Compression(String),
+
+    /// An encryption or authentication operation failed.
+    #[error("crypto error: {0}")]
+    Crypto(String),
 }
 
 /// Convenience alias used across the library.

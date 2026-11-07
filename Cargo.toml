@@ -12,6 +12,13 @@ serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 duckdb = { version = "1.20000.1", features = ["bundled"] }
+fastcdc = "5"
+blake3 = "1"
+zstd = "0.13"
+aes-gcm = "0.10"
+argon2 = "0.6"
+rand = "0.9"
+zeroize = { version = "1", features = ["derive"] }
 
 [package]
 name = "rust-backup"

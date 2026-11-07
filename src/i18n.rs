@@ -53,6 +53,10 @@ pub struct Texts {
     pub idle: &'static str,
     /// Cancel button.
     pub cancel: &'static str,
+    /// Cancelled state.
+    pub cancelled: &'static str,
+    /// Cancelled by user reason.
+    pub cancelled_by_user: &'static str,
     /// Files processed.
     pub files_done: &'static str,
     /// New chunks stored.
@@ -73,10 +77,20 @@ pub struct Texts {
     pub failed: &'static str,
     /// Settings: language.
     pub language: &'static str,
+    /// Settings: theme.
+    pub theme: &'static str,
+    /// Settings: dark theme.
+    pub theme_dark: &'static str,
+    /// Settings: light theme.
+    pub theme_light: &'static str,
     /// Settings: passphrase.
     pub passphrase: &'static str,
     /// Settings: passphrase help.
     pub passphrase_help: &'static str,
+    /// Status: passphrase active.
+    pub passphrase_set: &'static str,
+    /// Status: passphrase not set.
+    pub passphrase_unset: &'static str,
     /// Settings: catalog location.
     pub catalog_location: &'static str,
     /// Empty list message.
@@ -87,12 +101,22 @@ pub struct Texts {
     pub run_title: &'static str,
     /// Section: restore.
     pub restore: &'static str,
+    /// Select a job.
+    pub select_job: &'static str,
     /// Snapshot list heading.
     pub snapshots: &'static str,
+    /// Refresh button.
+    pub refresh: &'static str,
     /// Search placeholder for the file browser.
     pub search_files: &'static str,
     /// Select all files.
     pub select_all: &'static str,
+    /// Deselect all files.
+    pub deselect_all: &'static str,
+    /// Word: files.
+    pub files: &'static str,
+    /// Word: directories.
+    pub directories: &'static str,
     /// Restore to the original location.
     pub to_original: &'static str,
     /// Restore under a chosen directory.
@@ -137,6 +161,8 @@ pub const FR: Texts = Texts {
     running: "en cours",
     idle: "inactif",
     cancel: "Annuler",
+    cancelled: "Sauvegarde annulée",
+    cancelled_by_user: "Annulé par l'utilisateur",
     files_done: "Fichiers traités",
     new_chunks: "Nouveaux blocs",
     bytes_processed: "Données traitées",
@@ -147,16 +173,26 @@ pub const FR: Texts = Texts {
     success: "Succès",
     failed: "Échec",
     language: "Langue",
+    theme: "Thème",
+    theme_dark: "Sombre",
+    theme_light: "Clair",
     passphrase: "Phrase secrète du dépôt",
     passphrase_help: "Stockée en mémoire pour la session uniquement — jamais affichée ni journalisée.",
+    passphrase_set: "Phrase secrète en mémoire",
+    passphrase_unset: "Phrase secrète non définie",
     catalog_location: "Base de suivi locale",
     no_jobs: "Aucun job configuré — créez-en un ci-dessous.",
     no_history: "Aucune exécution enregistrée pour l'instant.",
     run_title: "Exécution en cours",
     restore: "Restauration",
+    select_job: "Sélectionner un job",
     snapshots: "Instantanés",
+    refresh: "Actualiser",
     search_files: "Rechercher un fichier…",
     select_all: "Tout sélectionner",
+    deselect_all: "Tout désélectionner",
+    files: "fichiers",
+    directories: "répertoires",
     to_original: "Emplacement d'origine",
     to_target: "Dossier de destination",
     overwrite_files: "Écraser les fichiers existants",
@@ -191,6 +227,8 @@ pub const EN: Texts = Texts {
     running: "running",
     idle: "idle",
     cancel: "Cancel",
+    cancelled: "Backup cancelled",
+    cancelled_by_user: "Cancelled by user",
     files_done: "Files processed",
     new_chunks: "New chunks",
     bytes_processed: "Data processed",
@@ -201,16 +239,26 @@ pub const EN: Texts = Texts {
     success: "Success",
     failed: "Failed",
     language: "Language",
+    theme: "Theme",
+    theme_dark: "Dark",
+    theme_light: "Light",
     passphrase: "Repository passphrase",
     passphrase_help: "Kept in memory for the session only — never shown or logged.",
+    passphrase_set: "Passphrase active in memory",
+    passphrase_unset: "Passphrase not set",
     catalog_location: "Local tracking database",
     no_jobs: "No job configured — create one below.",
     no_history: "No run recorded yet.",
     run_title: "Run in progress",
     restore: "Restore",
+    select_job: "Select a job",
     snapshots: "Snapshots",
+    refresh: "Refresh",
     search_files: "Search a file…",
     select_all: "Select all",
+    deselect_all: "Deselect all",
+    files: "files",
+    directories: "directories",
     to_original: "Original location",
     to_target: "Destination folder",
     overwrite_files: "Overwrite existing files",
@@ -234,19 +282,55 @@ impl Lang {
     }
 }
 
-/// Human-readable byte size (SI).
+/// Human-readable byte size with language units.
 #[must_use]
-pub fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["o", "Kio", "Mio", "Gio", "Tio", "Pio"];
+pub fn human_bytes_lang(bytes: u64, lang: Lang) -> String {
+    let units: [&str; 6] = match lang {
+        Lang::Fr => ["o", "Kio", "Mio", "Gio", "Tio", "Pio"],
+        Lang::En => ["B", "KiB", "MiB", "GiB", "TiB", "PiB"],
+    };
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    while value >= 1024.0 && unit < units.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
     if unit == 0 {
-        format!("{bytes} o")
+        format!("{bytes} {}", units[0])
     } else {
-        format!("{value:.1} {}", UNITS[unit])
+        format!("{value:.1} {}", units[unit])
+    }
+}
+
+/// Human-readable byte size (default French units for backward compatibility).
+#[must_use]
+#[allow(dead_code)]
+pub fn human_bytes(bytes: u64) -> String {
+    human_bytes_lang(bytes, Lang::Fr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_human_bytes_formatting() {
+        assert_eq!(human_bytes_lang(0, Lang::Fr), "0 o");
+        assert_eq!(human_bytes_lang(0, Lang::En), "0 B");
+        assert_eq!(human_bytes_lang(500, Lang::Fr), "500 o");
+        assert_eq!(human_bytes_lang(1024, Lang::Fr), "1.0 Kio");
+        assert_eq!(human_bytes_lang(1024, Lang::En), "1.0 KiB");
+        assert_eq!(human_bytes_lang(1024 * 1024 * 5, Lang::En), "5.0 MiB");
+        assert_eq!(human_bytes(2048), "2.0 Kio");
+    }
+
+    #[test]
+    fn test_texts_availability() {
+        let fr = Lang::Fr.texts();
+        let en = Lang::En.texts();
+        assert_eq!(fr.cancel, "Annuler");
+        assert_eq!(en.cancel, "Cancel");
+        assert_eq!(fr.theme_dark, "Sombre");
+        assert_eq!(en.theme_dark, "Dark");
     }
 }

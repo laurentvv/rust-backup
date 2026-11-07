@@ -279,8 +279,10 @@ pub fn spawn_restore(
     selection: Vec<rb_core::restore::RestoreSelection>,
     destination: rb_core::restore::RestoreDestination,
     overwrite: rb_core::restore::OverwritePolicy,
-) -> Receiver<RestoreEvent> {
+) -> (Receiver<RestoreEvent>, Arc<AtomicBool>) {
     let (tx, rx) = flume::unbounded();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_worker = Arc::clone(&cancel);
     std::thread::spawn(move || {
         let result = (|| {
             let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
@@ -293,7 +295,7 @@ pub fn spawn_restore(
                 &destination,
                 &rb_core::restore::RestoreOptions {
                     overwrite,
-                    cancel: None,
+                    cancel: Some(cancel_worker),
                 },
                 |event| {
                     if tx.send(RestoreEvent::Progress(event)).is_err() {
@@ -306,17 +308,33 @@ pub fn spawn_restore(
         })();
         let _ = tx.send(RestoreEvent::Finished(result));
     });
-    rx
+    (rx, cancel)
 }
 
-/// Runs a verification pass on a background thread; reports the structured report
+/// Verification event stream.
+pub enum VerifyEvent {
+    /// Progress event: checked chunks so far and total chunks.
+    Progress {
+        /// Chunks verified so far.
+        current: usize,
+        /// Total chunks to verify.
+        total: usize,
+    },
+    /// The verification finished (`Err` = user-facing error message).
+    Finished(Result<rb_core::verify::VerifyReport, String>),
+}
+
+/// Runs a verification pass on a background thread; reports progress and the structured report
 /// or an error message.
 pub fn spawn_verify(
     job: JobConfig,
     passphrase: String,
     full: bool,
-) -> Receiver<Result<rb_core::verify::VerifyReport, String>> {
-    let (tx, rx) = flume::bounded(1);
+) -> (Receiver<VerifyEvent>, Arc<AtomicBool>) {
+    let (tx, rx) = flume::unbounded();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_worker = Arc::clone(&cancel);
+    let tx_worker = tx.clone();
     std::thread::spawn(move || {
         let result = (|| {
             let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
@@ -327,7 +345,16 @@ pub fn spawn_verify(
             } else {
                 rb_core::verify::VerifyMode::Quick
             };
-            let report = rb_core::verify::verify(&repo, mode, None, |_, _| Ok(()))
+            let report =
+                rb_core::verify::verify(&repo, mode, Some(cancel_worker), |current, total| {
+                    if tx_worker
+                        .send(VerifyEvent::Progress { current, total })
+                        .is_err()
+                    {
+                        return Err(rb_core::Error::Cancelled);
+                    }
+                    Ok(())
+                })
                 .map_err(|e| e.to_string())?;
             if let Ok(catalog) = Catalog::default_path()
                 .map_err(|e| e.to_string())
@@ -337,7 +364,7 @@ pub fn spawn_verify(
             }
             Ok(report)
         })();
-        let _ = tx.send(result);
+        let _ = tx.send(VerifyEvent::Finished(result));
     });
-    rx
+    (rx, cancel)
 }

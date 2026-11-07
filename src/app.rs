@@ -70,6 +70,16 @@ pub enum RunPhase {
     Cancelled,
 }
 
+/// History section tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryTab {
+    /// Backup runs.
+    #[default]
+    Runs,
+    /// Integrity verifications.
+    Verify,
+}
+
 /// The root application view.
 pub struct RustBackupApp {
     section: Section,
@@ -114,12 +124,107 @@ pub struct RustBackupApp {
     restore_overwrite: bool,
     restore_busy: bool,
     restore_result: Option<(bool, String)>,
+    restore_cancel: Option<Arc<AtomicBool>>,
+    restore_files_done: u64,
+    restore_files_total: u64,
+    restore_bytes_done: u64,
+    restore_bytes_total: u64,
+    restore_current_file: String,
+    restore_view_tree: bool,
+    expanded_folders: std::collections::BTreeSet<String>,
+
+    // --- verify state ---
+    verify_busy: bool,
+    verify_cancel: Option<Arc<AtomicBool>>,
+    verify_current_job: Option<JobId>,
+    verify_progress: Option<(usize, usize)>,
+    verify_outcomes: Vec<rb_core::verify::VerifyOutcome>,
+
+    // --- history tab ---
+    history_tab: HistoryTab,
+
     dark: bool,
     run_est_files: u64,
 
     // --- cached statistics for fast render ---
     cached_snapshot_count: usize,
     cached_protected_volume: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RestoreTreeNode {
+    name: String,
+    path: String,
+    subdirs: std::collections::BTreeMap<String, RestoreTreeNode>,
+    files: Vec<(String, String, u64)>, // (full_rel, name, size)
+    all_files: Vec<String>,
+    total_size: u64,
+}
+
+impl RestoreTreeNode {
+    fn new(name: String, path: String) -> Self {
+        Self {
+            name,
+            path,
+            subdirs: std::collections::BTreeMap::new(),
+            files: Vec::new(),
+            all_files: Vec::new(),
+            total_size: 0,
+        }
+    }
+
+    fn collect_all_dirs(&self, out: &mut Vec<String>) {
+        if !self.path.is_empty() {
+            out.push(self.path.clone());
+        }
+        for sub in self.subdirs.values() {
+            sub.collect_all_dirs(out);
+        }
+    }
+}
+
+fn build_restore_tree(entries: &[(String, String, u64)], search: &str) -> (RestoreTreeNode, usize) {
+    let mut root = RestoreTreeNode::new(String::new(), String::new());
+    let mut total_matching_files = 0;
+
+    for (_, rel, size) in entries {
+        let rel_norm = rel.replace('\\', "/");
+        if !search.is_empty() && !rel_norm.to_lowercase().contains(search) {
+            continue;
+        }
+        total_matching_files += 1;
+        let parts: Vec<&str> = rel_norm.split('/').collect();
+        if parts.len() == 1 {
+            root.files
+                .push((rel_norm.clone(), parts[0].to_string(), *size));
+            root.all_files.push(rel_norm);
+            root.total_size += size;
+        } else {
+            let mut curr = &mut root;
+            let mut prefix = String::new();
+            for (idx, part) in parts.iter().enumerate() {
+                if idx == parts.len() - 1 {
+                    curr.files
+                        .push((rel_norm.clone(), (*part).to_string(), *size));
+                    curr.all_files.push(rel_norm.clone());
+                    curr.total_size += size;
+                } else {
+                    if !prefix.is_empty() {
+                        prefix.push('/');
+                    }
+                    prefix.push_str(part);
+                    let path_clone = prefix.clone();
+                    curr = curr
+                        .subdirs
+                        .entry((*part).to_string())
+                        .or_insert_with(|| RestoreTreeNode::new((*part).to_string(), path_clone));
+                    curr.all_files.push(rel_norm.clone());
+                    curr.total_size += size;
+                }
+            }
+        }
+    }
+    (root, total_matching_files)
 }
 
 impl RustBackupApp {
@@ -178,6 +283,20 @@ impl RustBackupApp {
             restore_overwrite: false,
             restore_busy: false,
             restore_result: None,
+            restore_cancel: None,
+            restore_files_done: 0,
+            restore_files_total: 0,
+            restore_bytes_done: 0,
+            restore_bytes_total: 0,
+            restore_current_file: String::new(),
+            restore_view_tree: true,
+            expanded_folders: std::collections::BTreeSet::new(),
+            verify_busy: false,
+            verify_cancel: None,
+            verify_current_job: None,
+            verify_progress: None,
+            verify_outcomes: Vec::new(),
+            history_tab: HistoryTab::Runs,
             dark: false,
             run_est_files: 0,
             cached_snapshot_count: 0,
@@ -239,6 +358,9 @@ impl RustBackupApp {
         self.recent_runs = runs.into_iter().take(30).collect();
         self.cached_snapshot_count = total_snapshots;
         self.cached_protected_volume = protected_vol;
+        if let Ok(outcomes) = catalog.list_verify_results(50) {
+            self.verify_outcomes = outcomes;
+        }
     }
 
     fn start_backup(
@@ -459,10 +581,23 @@ impl RustBackupApp {
             rb_core::restore::OverwritePolicy::Skip
         };
 
+        let total_bytes: u64 = snapshot
+            .entries
+            .iter()
+            .filter(|(_, rel, _)| self.selected_paths.contains(rel.as_str()))
+            .map(|(_, _, sz)| *sz)
+            .sum();
+
         self.restore_busy = true;
         self.restore_result = None;
+        self.restore_files_done = 0;
+        self.restore_files_total = self.selected_paths.len() as u64;
+        self.restore_bytes_done = 0;
+        self.restore_bytes_total = total_bytes;
+        self.restore_current_file = String::new();
         cx.notify();
-        let rx = runner::spawn_restore(
+
+        let (rx, cancel) = runner::spawn_restore(
             job,
             passphrase,
             snapshot.id,
@@ -470,14 +605,34 @@ impl RustBackupApp {
             destination,
             overwrite,
         );
+        self.restore_cancel = Some(cancel);
+
         cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv_async().await {
                 let Ok(()) = this.update(cx, |app, _cx| match event {
+                    runner::RestoreEvent::Progress(
+                        rb_core::restore::RestoreEvent::FileStarted { dest, .. },
+                    ) => {
+                        app.restore_current_file = dest
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| dest.display().to_string());
+                    }
                     runner::RestoreEvent::Progress(rb_core::restore::RestoreEvent::FileDone {
+                        bytes,
                         ..
-                    }) => {}
+                    }) => {
+                        app.restore_files_done += 1;
+                        app.restore_bytes_done += bytes;
+                    }
+                    runner::RestoreEvent::Progress(
+                        rb_core::restore::RestoreEvent::FileSkipped { .. },
+                    ) => {
+                        app.restore_files_done += 1;
+                    }
                     runner::RestoreEvent::Finished(Ok(stats)) => {
                         app.restore_busy = false;
+                        app.restore_cancel = None;
                         app.restore_result = Some((
                             false,
                             format!(
@@ -494,10 +649,15 @@ impl RustBackupApp {
                     }
                     runner::RestoreEvent::Finished(Err(message)) => {
                         app.restore_busy = false;
-                        app.restore_result =
-                            Some((true, format!("{} — {message}", app.texts().restore_failed)));
+                        app.restore_cancel = None;
+                        if message.contains("Cancelled") || message.contains("annulée") {
+                            app.restore_result =
+                                Some((true, app.texts().restore_cancelled.to_string()));
+                        } else {
+                            app.restore_result =
+                                Some((true, format!("{} — {message}", app.texts().restore_failed)));
+                        }
                     }
-                    _ => {}
                 }) else {
                     break;
                 };
@@ -505,6 +665,14 @@ impl RustBackupApp {
             }
         })
         .detach();
+    }
+
+    fn cancel_restore(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(cancel) = &self.restore_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.restore_result = Some((true, self.texts().restore_cancelled.to_string()));
+            cx.notify();
+        }
     }
 
     fn run_verify(
@@ -515,6 +683,9 @@ impl RustBackupApp {
         full: bool,
     ) {
         let t = self.texts();
+        if self.verify_busy {
+            return;
+        }
         let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
             return;
         };
@@ -524,56 +695,90 @@ impl RustBackupApp {
             cx.notify();
             return;
         }
-        self.toast = Some((false, format!("{} …", t.verify)));
+        self.verify_busy = true;
+        self.verify_current_job = Some(job_id);
+        self.verify_progress = None;
+        self.toast = Some((false, t.verify_running.to_string()));
         cx.notify();
-        let rx = runner::spawn_verify(job, passphrase, full);
+
+        let (rx, cancel) = runner::spawn_verify(job, passphrase, full);
+        self.verify_cancel = Some(cancel);
+
         cx.spawn(async move |this, cx| {
-            if let Ok(result) = rx.recv_async().await {
-                let _ = this.update(cx, |app, cx| {
-                    match result {
-                        Ok(report) => {
-                            if report.ok() {
-                                let msg = match app.lang {
-                                    Lang::Fr => format!(
-                                        "Intégrité OK : {} instantanés, {} fragments vérifiés",
-                                        report.manifests_checked, report.chunks_checked
-                                    ),
-                                    Lang::En => format!(
-                                        "Integrity OK: {} snapshots, {} chunks verified",
-                                        report.manifests_checked, report.chunks_checked
-                                    ),
-                                };
-                                app.toast = Some((false, msg));
-                            } else {
-                                let issues_msg = report
-                                    .issues
-                                    .iter()
-                                    .map(|i| i.message.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("; ");
-                                let msg = match app.lang {
-                                    Lang::Fr => format!(
-                                        "{} problème(s) détecté(s) : {}",
-                                        report.issues.len(),
-                                        issues_msg
-                                    ),
-                                    Lang::En => format!(
-                                        "{} issue(s) detected: {}",
-                                        report.issues.len(),
-                                        issues_msg
-                                    ),
-                                };
-                                app.toast = Some((true, msg));
+            while let Ok(event) = rx.recv_async().await {
+                let Ok(()) = this.update(cx, |app, cx| match event {
+                    runner::VerifyEvent::Progress { current, total } => {
+                        app.verify_progress = Some((current, total));
+                        cx.notify();
+                    }
+                    runner::VerifyEvent::Finished(result) => {
+                        app.verify_busy = false;
+                        app.verify_cancel = None;
+                        app.verify_current_job = None;
+                        app.verify_progress = None;
+                        app.refresh_catalog();
+                        match result {
+                            Ok(report) => {
+                                if report.ok() {
+                                    let msg = match app.lang {
+                                        Lang::Fr => format!(
+                                            "Intégrité OK : {} instantanés, {} fragments vérifiés",
+                                            report.manifests_checked, report.chunks_checked
+                                        ),
+                                        Lang::En => format!(
+                                            "Integrity OK: {} snapshots, {} chunks verified",
+                                            report.manifests_checked, report.chunks_checked
+                                        ),
+                                    };
+                                    app.toast = Some((false, msg));
+                                } else {
+                                    let issues_msg = report
+                                        .issues
+                                        .iter()
+                                        .map(|i| i.message.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("; ");
+                                    let msg = match app.lang {
+                                        Lang::Fr => format!(
+                                            "{} problème(s) détecté(s) : {}",
+                                            report.issues.len(),
+                                            issues_msg
+                                        ),
+                                        Lang::En => format!(
+                                            "{} issue(s) detected: {}",
+                                            report.issues.len(),
+                                            issues_msg
+                                        ),
+                                    };
+                                    app.toast = Some((true, msg));
+                                }
+                            }
+                            Err(message) => {
+                                if message.contains("Cancelled") || message.contains("annulée") {
+                                    app.toast =
+                                        Some((true, app.texts().verify_cancelled.to_string()));
+                                } else {
+                                    app.toast = Some((true, message));
+                                }
                             }
                         }
-                        Err(message) => app.toast = Some((true, message)),
+                        app.auto_dismiss_toast(cx);
+                        cx.notify();
                     }
-                    app.auto_dismiss_toast(cx);
-                    cx.notify();
-                });
+                }) else {
+                    break;
+                };
             }
         })
         .detach();
+    }
+
+    fn cancel_verify(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(cancel) = &self.verify_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.toast = Some((false, self.texts().verify_cancelled.to_string()));
+            cx.notify();
+        }
     }
 
     fn elapsed_seconds(&self) -> u64 {
@@ -1196,6 +1401,7 @@ impl RustBackupApp {
                             h_flex()
                                 .gap_2()
                                 .items_center()
+                                .flex_wrap()
                                 .child(
                                     Button::new(gpui::SharedString::new(format!(
                                         "run-{}",
@@ -1210,14 +1416,26 @@ impl RustBackupApp {
                                 )
                                 .child(
                                     Button::new(gpui::SharedString::new(format!(
-                                        "verify-{}",
+                                        "verify-quick-{}",
                                         job.id.simple()
                                     )))
                                     .ghost()
                                     .icon(IconName::ShieldCheck)
-                                    .label(t.verify)
+                                    .label(t.verify_quick)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.run_verify(window, cx, id, false);
+                                    })),
+                                )
+                                .child(
+                                    Button::new(gpui::SharedString::new(format!(
+                                        "verify-full-{}",
+                                        job.id.simple()
+                                    )))
+                                    .ghost()
+                                    .icon(IconName::Sparkles)
+                                    .label(t.verify_full)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.run_verify(window, cx, id, true);
                                     })),
                                 )
                                 .child(
@@ -1255,6 +1473,77 @@ impl RustBackupApp {
                                         this.delete_job(window, cx, id);
                                     })),
                                 ),
+                        )
+                        .when(
+                            self.verify_busy && self.verify_current_job == Some(id),
+                            |this| {
+                                let (cur, tot) = self.verify_progress.unwrap_or((0, 0));
+                                let pct = if tot > 0 {
+                                    (cur as f32 / tot as f32).min(1.0)
+                                } else {
+                                    0.0
+                                };
+                                this.child(
+                                    v_flex()
+                                        .gap_2()
+                                        .p_3()
+                                        .rounded_md()
+                                        .bg(cx.theme().primary.opacity(0.08))
+                                        .border_1()
+                                        .border_color(cx.theme().primary.opacity(0.3))
+                                        .child(
+                                            h_flex()
+                                                .justify_between()
+                                                .items_center()
+                                                .text_size(px(12.0))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .items_center()
+                                                        .child(Spinner::new())
+                                                        .child(if tot > 0 {
+                                                            format!(
+                                                                "{} : {} / {} {}",
+                                                                t.verify_running,
+                                                                cur,
+                                                                tot,
+                                                                t.chunks_checked
+                                                            )
+                                                        } else {
+                                                            t.verify_running.to_string()
+                                                        }),
+                                                )
+                                                .child(
+                                                    Button::new(gpui::SharedString::new(format!(
+                                                        "cancel-verify-{}",
+                                                        job.id.simple()
+                                                    )))
+                                                    .danger()
+                                                    .icon(IconName::X)
+                                                    .label(t.cancel)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.cancel_verify(cx);
+                                                    })),
+                                                ),
+                                        )
+                                        .when(tot > 0, |this| {
+                                            this.child(
+                                                div()
+                                                    .w_full()
+                                                    .h(px(4.0))
+                                                    .rounded_full()
+                                                    .bg(cx.theme().border)
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .rounded_full()
+                                                            .bg(cx.theme().primary)
+                                                            .w(relative(pct)),
+                                                    ),
+                                            )
+                                        }),
+                                )
+                            },
                         )
                         .into_any_element()
                 })
@@ -1742,6 +2031,227 @@ impl RustBackupApp {
             })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_restore_tree_rows(
+        node: &RestoreTreeNode,
+        depth: usize,
+        search_active: bool,
+        expanded_folders: &std::collections::BTreeSet<String>,
+        selected_paths: &std::collections::BTreeSet<String>,
+        lang: Lang,
+        cx: &mut gpui::Context<RustBackupApp>,
+        out: &mut Vec<AnyElement>,
+    ) {
+        if depth > 0 {
+            let is_expanded = search_active || expanded_folders.contains(&node.path);
+            let all_selected = !node.all_files.is_empty()
+                && node.all_files.iter().all(|f| selected_paths.contains(f));
+            let some_selected =
+                !all_selected && node.all_files.iter().any(|f| selected_paths.contains(f));
+
+            let folder_path = node.path.clone();
+            let folder_files = node.all_files.clone();
+            let folder_name = node.name.clone();
+            let total_size = node.total_size;
+
+            let row = h_flex()
+                .id(gpui::SharedString::new(format!("tree-dir-{}", node.path)))
+                .gap_2()
+                .items_center()
+                .p_1()
+                .rounded_md()
+                .pl(px(((depth - 1) * 16) as f32 + 4.0))
+                .hover(|s| s.bg(cx.theme().accent.opacity(0.1)))
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .cursor_pointer()
+                        .child(if is_expanded {
+                            Icon::new(IconName::ChevronDown).into_any_element()
+                        } else {
+                            Icon::new(IconName::ChevronRight).into_any_element()
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let path = folder_path.clone();
+                                move |this, _, _, cx| {
+                                    if this.expanded_folders.contains(&path) {
+                                        this.expanded_folders.remove(&path);
+                                    } else {
+                                        this.expanded_folders.insert(path.clone());
+                                    }
+                                    cx.notify();
+                                }
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .cursor_pointer()
+                        .text_color(if all_selected || some_selected {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(if all_selected {
+                            Icon::new(IconName::Check).into_any_element()
+                        } else {
+                            Icon::new(IconName::Square).into_any_element()
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let files = folder_files.clone();
+                                move |this, _, _, cx| {
+                                    let all_picked =
+                                        files.iter().all(|f| this.selected_paths.contains(f));
+                                    if all_picked {
+                                        for f in &files {
+                                            this.selected_paths.remove(f);
+                                        }
+                                    } else {
+                                        for f in &files {
+                                            this.selected_paths.insert(f.clone());
+                                        }
+                                    }
+                                    cx.notify();
+                                }
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .text_color(cx.theme().primary)
+                        .child(if is_expanded {
+                            Icon::new(IconName::FolderOpen).into_any_element()
+                        } else {
+                            Icon::new(IconName::Folder).into_any_element()
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .cursor_pointer()
+                        .child(folder_name)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let path = folder_path.clone();
+                                move |this, _, _, cx| {
+                                    if this.expanded_folders.contains(&path) {
+                                        this.expanded_folders.remove(&path);
+                                    } else {
+                                        this.expanded_folders.insert(path.clone());
+                                    }
+                                    cx.notify();
+                                }
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "{} files ({})",
+                            folder_files.len(),
+                            human_bytes_lang(total_size, lang)
+                        )),
+                );
+
+            out.push(row.into_any_element());
+
+            if !is_expanded {
+                return;
+            }
+        }
+
+        for subdir in node.subdirs.values() {
+            Self::render_restore_tree_rows(
+                subdir,
+                depth + 1,
+                search_active,
+                expanded_folders,
+                selected_paths,
+                lang,
+                cx,
+                out,
+            );
+        }
+
+        for (full_rel, file_name, size) in &node.files {
+            let full_rel = full_rel.clone();
+            let file_name = file_name.clone();
+            let size = *size;
+            let picked = selected_paths.contains(&full_rel);
+
+            let row = h_flex()
+                .id(gpui::SharedString::new(format!("tree-file-{}", full_rel)))
+                .gap_2()
+                .items_center()
+                .p_1()
+                .rounded_md()
+                .pl(px((depth * 16) as f32 + 20.0))
+                .when(picked, |this| this.bg(cx.theme().selection))
+                .hover(|s| s.bg(cx.theme().accent.opacity(0.08)))
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .cursor_pointer()
+                        .text_color(if picked {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(if picked {
+                            Icon::new(IconName::Check).into_any_element()
+                        } else {
+                            Icon::new(IconName::Square).into_any_element()
+                        }),
+                )
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Icon::new(IconName::FileText).into_any_element()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.0))
+                        .cursor_pointer()
+                        .child(file_name),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(human_bytes_lang(size, lang)),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener({
+                        let rel = full_rel.clone();
+                        move |this, _, _, cx| {
+                            if this.selected_paths.contains(&rel) {
+                                this.selected_paths.remove(&rel);
+                            } else {
+                                this.selected_paths.insert(rel.clone());
+                            }
+                            cx.notify();
+                        }
+                    }),
+                );
+
+            out.push(row.into_any_element());
+        }
+    }
+
     fn render_restore(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let t = self.texts();
         let selected = self.selected_snapshot;
@@ -1792,65 +2302,171 @@ impl RustBackupApp {
             .value()
             .to_string()
             .to_lowercase();
-        let files: Vec<&(String, String, u64)> = self
+        let active_snapshot_entries = self
             .snapshots
             .iter()
             .find(|s| Some(s.id) == selected)
-            .map(|s| {
-                s.entries
-                    .iter()
-                    .filter(|(_, rel, _)| search.is_empty() || rel.to_lowercase().contains(&search))
-                    .collect()
-            })
+            .map(|s| s.entries.as_slice())
             .unwrap_or_default();
 
-        let file_rows: Vec<AnyElement> = files
-            .iter()
-            .map(|(_, rel, size)| {
-                let rel = rel.clone();
+        let (tree_root, matching_files_count) =
+            build_restore_tree(active_snapshot_entries, &search);
+        let mut all_dir_paths = Vec::new();
+        tree_root.collect_all_dirs(&mut all_dir_paths);
+
+        let mut file_items: Vec<AnyElement> = Vec::new();
+        if self.restore_view_tree {
+            Self::render_restore_tree_rows(
+                &tree_root,
+                0,
+                !search.is_empty(),
+                &self.expanded_folders,
+                &self.selected_paths,
+                self.lang,
+                cx,
+                &mut file_items,
+            );
+        } else {
+            for (_, rel, size) in active_snapshot_entries {
+                let rel = rel.replace('\\', "/");
+                if !search.is_empty() && !rel.to_lowercase().contains(&search) {
+                    continue;
+                }
                 let size = *size;
                 let picked = self.selected_paths.contains(rel.as_str());
-                h_flex()
-                    .id(gpui::SharedString::new(rel.clone()))
-                    .gap_2()
-                    .p_1()
-                    .rounded_md()
-                    .when(picked, |this| this.bg(cx.theme().selection))
-                    .child(
-                        div()
-                            .w(px(16.0))
-                            .text_color(if picked {
-                                cx.theme().primary
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .child(if picked {
-                                Icon::new(IconName::Check).into_any_element()
-                            } else {
-                                Icon::new(IconName::Square).into_any_element()
+                file_items.push(
+                    h_flex()
+                        .id(gpui::SharedString::new(rel.clone()))
+                        .gap_2()
+                        .p_1()
+                        .rounded_md()
+                        .when(picked, |this| this.bg(cx.theme().selection))
+                        .child(
+                            div()
+                                .w(px(16.0))
+                                .text_color(if picked {
+                                    cx.theme().primary
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .child(if picked {
+                                    Icon::new(IconName::Check).into_any_element()
+                                } else {
+                                    Icon::new(IconName::Square).into_any_element()
+                                }),
+                        )
+                        .child(
+                            div()
+                                .w(px(16.0))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(Icon::new(IconName::FileText).into_any_element()),
+                        )
+                        .child(div().flex_1().text_size(px(12.0)).child(rel.clone()))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(human_bytes_lang(size, self.lang)),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                if this.selected_paths.contains(rel.as_str()) {
+                                    this.selected_paths.remove(rel.as_str());
+                                } else {
+                                    this.selected_paths.insert(rel.to_string());
+                                }
+                                cx.notify();
                             }),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+
+        let restore_progress_card = if self.restore_busy {
+            let pct = if self.restore_files_total > 0 {
+                (self.restore_files_done as f32 / self.restore_files_total as f32).min(1.0)
+            } else {
+                0.0
+            };
+            Some(
+                v_flex()
+                    .gap_3()
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().primary.opacity(0.4))
+                    .bg(cx.theme().primary.opacity(0.08))
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                h_flex().gap_2().items_center().child(Spinner::new()).child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().foreground)
+                                        .child(t.restoring),
+                                ),
+                            )
+                            .child(
+                                Button::new("cancel-restore-btn")
+                                    .danger()
+                                    .icon(IconName::X)
+                                    .label(t.cancel_restore)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_restore(cx);
+                                    })),
+                            ),
                     )
-                    .child(div().flex_1().text_size(px(12.0)).child(rel.clone()))
                     .child(
                         div()
+                            .w_full()
+                            .h(px(6.0))
+                            .rounded_full()
+                            .bg(cx.theme().border)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(cx.theme().primary)
+                                    .w(relative(pct)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_between()
                             .text_size(px(12.0))
                             .text_color(cx.theme().muted_foreground)
-                            .child(human_bytes_lang(size, self.lang)),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            if this.selected_paths.contains(rel.as_str()) {
-                                this.selected_paths.remove(rel.as_str());
+                            .child(if self.restore_current_file.is_empty() {
+                                t.restoring.to_string()
                             } else {
-                                this.selected_paths.insert(rel.to_string());
-                            }
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+                                self.restore_current_file.clone()
+                            })
+                            .child(if self.restore_bytes_total > 0 {
+                                format!(
+                                    "{} / {} {} ({} / {})",
+                                    self.restore_files_done,
+                                    self.restore_files_total,
+                                    t.files,
+                                    human_bytes_lang(self.restore_bytes_done, self.lang),
+                                    human_bytes_lang(self.restore_bytes_total, self.lang)
+                                )
+                            } else {
+                                format!(
+                                    "{} / {} {} ({})",
+                                    self.restore_files_done,
+                                    self.restore_files_total,
+                                    t.files,
+                                    human_bytes_lang(self.restore_bytes_done, self.lang)
+                                )
+                            }),
+                    ),
+            )
+        } else {
+            None
+        };
 
         let banner = self.restore_result.clone().map(|(is_error, message)| {
             let color = if is_error {
@@ -1868,10 +2484,43 @@ impl RustBackupApp {
                 .child(message)
         });
 
-        let all_selected = !files.is_empty()
-            && files
+        let all_selected = matching_files_count > 0
+            && active_snapshot_entries
                 .iter()
                 .all(|(_, rel, _)| self.selected_paths.contains(rel.as_str()));
+
+        let expand_all_btn = if self.restore_view_tree {
+            let dirs = all_dir_paths.clone();
+            Some(
+                Button::new("expand-all")
+                    .ghost()
+                    .icon(IconName::ChevronDown)
+                    .label(t.expand_all)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        for d in &dirs {
+                            this.expanded_folders.insert(d.clone());
+                        }
+                        cx.notify();
+                    })),
+            )
+        } else {
+            None
+        };
+
+        let collapse_all_btn = if self.restore_view_tree {
+            Some(
+                Button::new("collapse-all")
+                    .ghost()
+                    .icon(IconName::ChevronRight)
+                    .label(t.collapse_all)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.expanded_folders.clear();
+                        cx.notify();
+                    })),
+            )
+        } else {
+            None
+        };
 
         let job_selector = if self.jobs.len() > 1 {
             let mut tabs = h_flex().gap_2().items_center().flex_wrap();
@@ -1911,6 +2560,7 @@ impl RustBackupApp {
             .gap_4()
             .child(self.section_header(IconName::Archive, t.restore, cx))
             .when_some(job_selector, |this, js| this.child(js))
+            .when_some(restore_progress_card, |this, pc| this.child(pc))
             .when_some(banner, |this, b| this.child(b))
             .child(
                 Button::new("reload-snapshots")
@@ -1983,23 +2633,57 @@ impl RustBackupApp {
                                 ),
                         )
                         .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!(
-                                    "{} {}",
-                                    self.selected_paths.len(),
-                                    t.selected_files
-                                )),
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            Button::new("view-tree")
+                                                .ghost()
+                                                .when(self.restore_view_tree, |b| b.primary())
+                                                .icon(IconName::Layers)
+                                                .label(t.tree_view)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.restore_view_tree = true;
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("view-flat")
+                                                .ghost()
+                                                .when(!self.restore_view_tree, |b| b.primary())
+                                                .icon(IconName::List)
+                                                .label(t.flat_view)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.restore_view_tree = false;
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .when_some(expand_all_btn, |this, b| this.child(b))
+                                        .when_some(collapse_all_btn, |this, b| this.child(b)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "{} {}",
+                                            self.selected_paths.len(),
+                                            t.selected_files
+                                        )),
+                                ),
                         )
                         .child({
                             let mut file_list = v_flex().gap_1();
-                            for row in file_rows {
+                            for row in file_items {
                                 file_list = file_list.child(row);
                             }
                             file_list
                                 .id("restore-file-list")
-                                .max_h(px(340.0))
+                                .max_h(px(360.0))
                                 .overflow_y_scroll()
                         }),
                 )
@@ -2090,69 +2774,93 @@ impl RustBackupApp {
 
     fn render_history(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let t = self.texts();
-        let header = h_flex()
-            .gap_4()
-            .p_2()
-            .text_size(px(12.0))
-            .text_color(cx.theme().muted_foreground)
-            .child(div().w(px(180.0)).child(t.jobs.to_string()))
-            .child(div().w(px(90.0)).child(t.status))
-            .child(div().flex_1().child("UTC"))
-            .child(div().w(px(110.0)).child(t.files_done))
-            .child(div().w(px(110.0)).child(t.new_chunks));
+        let tabs = h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                Button::new("tab-runs")
+                    .label(t.backup_history)
+                    .when(self.history_tab == HistoryTab::Runs, |b| b.primary())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.history_tab = HistoryTab::Runs;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("tab-verify")
+                    .label(format!(
+                        "{} ({})",
+                        t.verify_history,
+                        self.verify_outcomes.len()
+                    ))
+                    .when(self.history_tab == HistoryTab::Verify, |b| b.primary())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.history_tab = HistoryTab::Verify;
+                        cx.notify();
+                    })),
+            );
 
-        let rows: Vec<AnyElement> = self
-            .recent_runs
-            .iter()
-            .map(|(job, run)| {
-                let (color, label) = match run.status {
-                    RunStatus::Success => (cx.theme().success, t.success),
-                    RunStatus::Failed => (cx.theme().danger, t.failed),
-                };
-                h_flex()
-                    .id(gpui::SharedString::new(run.id.to_string()))
+        let content = match self.history_tab {
+            HistoryTab::Runs => {
+                let header = h_flex()
                     .gap_4()
                     .p_2()
-                    .rounded_md()
-                    .child(div().w(px(180.0)).child(job.clone()))
-                    .child(div().w(px(90.0)).text_color(color).child(label.to_string()))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(run.started_at.to_rfc3339()),
-                    )
-                    .child(div().w(px(110.0)).child(run.files_total.to_string()))
-                    .child(div().w(px(110.0)).child(run.chunks_new.to_string()))
-                    .into_any_element()
-            })
-            .collect();
+                    .text_size(px(12.0))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().w(px(180.0)).child(t.jobs.to_string()))
+                    .child(div().w(px(90.0)).child(t.status))
+                    .child(div().flex_1().child("UTC"))
+                    .child(div().w(px(110.0)).child(t.files_done))
+                    .child(div().w(px(110.0)).child(t.new_chunks));
 
-        let mut history_list = v_flex().gap_1();
-        for row in rows {
-            history_list = history_list.child(row);
-        }
-        let body = if self.recent_runs.is_empty() {
-            v_flex()
-                .p_6()
-                .rounded_lg()
-                .border_1()
-                .border_dashed()
-                .border_color(cx.theme().border)
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(t.no_history),
-                )
-                .into_any_element()
-        } else {
-            history_list.into_any_element()
-        };
+                let rows: Vec<AnyElement> = self
+                    .recent_runs
+                    .iter()
+                    .map(|(job, run)| {
+                        let (color, label) = match run.status {
+                            RunStatus::Success => (cx.theme().success, t.success),
+                            RunStatus::Failed => (cx.theme().danger, t.failed),
+                        };
+                        h_flex()
+                            .id(gpui::SharedString::new(run.id.to_string()))
+                            .gap_4()
+                            .p_2()
+                            .rounded_md()
+                            .child(div().w(px(180.0)).child(job.clone()))
+                            .child(div().w(px(90.0)).text_color(color).child(label.to_string()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(run.started_at.to_rfc3339()),
+                            )
+                            .child(div().w(px(110.0)).child(run.files_total.to_string()))
+                            .child(div().w(px(110.0)).child(run.chunks_new.to_string()))
+                            .into_any_element()
+                    })
+                    .collect();
 
-        v_flex()
-            .gap_4()
-            .child(self.section_header(IconName::Clock, t.history, cx))
-            .child(
+                let mut history_list = v_flex().gap_1();
+                for row in rows {
+                    history_list = history_list.child(row);
+                }
+                let body = if self.recent_runs.is_empty() {
+                    v_flex()
+                        .p_6()
+                        .rounded_lg()
+                        .border_1()
+                        .border_dashed()
+                        .border_color(cx.theme().border)
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(t.no_history),
+                        )
+                        .into_any_element()
+                } else {
+                    history_list.into_any_element()
+                };
+
                 v_flex()
                     .p_2()
                     .rounded_lg()
@@ -2160,8 +2868,124 @@ impl RustBackupApp {
                     .border_color(cx.theme().border)
                     .bg(cx.theme().background)
                     .child(header)
-                    .child(body),
-            )
+                    .child(body)
+                    .into_any_element()
+            }
+            HistoryTab::Verify => {
+                let verify_header = h_flex()
+                    .gap_4()
+                    .p_2()
+                    .text_size(px(12.0))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().w(px(200.0)).child(t.jobs.to_string()))
+                    .child(div().w(px(110.0)).child(t.verify_mode))
+                    .child(div().w(px(120.0)).child(t.status))
+                    .child(div().w(px(140.0)).child(t.chunks_checked))
+                    .child(div().w(px(180.0)).child("UTC"))
+                    .child(div().flex_1().child(t.issues_found));
+
+                let verify_rows: Vec<AnyElement> = self
+                    .verify_outcomes
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, outcome)| {
+                        let (color, label) = if outcome.ok {
+                            (cx.theme().success, t.integrity_ok)
+                        } else {
+                            (cx.theme().danger, t.failed)
+                        };
+                        let mode_str = match outcome.mode {
+                            rb_core::verify::VerifyMode::Quick => t.verify_quick,
+                            rb_core::verify::VerifyMode::Full => t.verify_full,
+                        };
+                        let issues_text = if outcome.issues.is_empty() {
+                            "—".to_string()
+                        } else {
+                            outcome.issues.join("; ")
+                        };
+                        h_flex()
+                            .id(gpui::SharedString::new(format!("verify-outcome-{idx}")))
+                            .gap_4()
+                            .p_2()
+                            .rounded_md()
+                            .child(
+                                div()
+                                    .w(px(200.0))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(outcome.repo.clone()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(110.0))
+                                    .text_color(cx.theme().primary)
+                                    .child(mode_str.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(120.0))
+                                    .text_color(color)
+                                    .child(label.to_string()),
+                            )
+                            .child(div().w(px(140.0)).child(outcome.chunks_checked.to_string()))
+                            .child(
+                                div()
+                                    .w(px(180.0))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(outcome.finished_at.to_rfc3339()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_color(if outcome.ok {
+                                        cx.theme().muted_foreground
+                                    } else {
+                                        cx.theme().danger
+                                    })
+                                    .child(issues_text),
+                            )
+                            .into_any_element()
+                    })
+                    .collect();
+
+                let mut verify_list = v_flex().gap_1();
+                for row in verify_rows {
+                    verify_list = verify_list.child(row);
+                }
+                let body = if self.verify_outcomes.is_empty() {
+                    v_flex()
+                        .p_6()
+                        .rounded_lg()
+                        .border_1()
+                        .border_dashed()
+                        .border_color(cx.theme().border)
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(t.no_verify_history),
+                        )
+                        .into_any_element()
+                } else {
+                    verify_list.into_any_element()
+                };
+
+                v_flex()
+                    .p_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .child(verify_header)
+                    .child(body)
+                    .into_any_element()
+            }
+        };
+
+        v_flex()
+            .gap_4()
+            .child(self.section_header(IconName::Clock, t.history, cx))
+            .child(tabs)
+            .child(content)
     }
 
     fn render_settings(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {

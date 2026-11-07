@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Strata: a rounded cross-section of five sediment layers, newest on top -->
+  <defs>
+    <clipPath id="st-clip"><rect x="6" y="6" width="52" height="52" rx="13"/></clipPath>
+  </defs>
+  <g clip-path="url(#st-clip)">
+    <rect x="0" y="0" width="64" height="64" fill="#BFD3F2"/>
+    <path d="M0 21 C16 15 34 27 64 19 V64 H0 Z" fill="#E6C38F"/>
+    <path d="M0 32 C18 26 36 38 64 30 V64 H0 Z" fill="#C47E55"/>
+    <path d="M0 42 C20 37 38 47 64 40 V64 H0 Z" fill="#4F6B95"/>
+    <path d="M0 51 C20 47 40 56 64 50 V64 H0 Z" fill="#22304F"/>
+  </g>
+</svg>

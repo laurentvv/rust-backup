@@ -137,6 +137,40 @@ pub struct Texts {
     pub selected_files: &'static str,
     /// Passphrase required hint.
     pub passphrase_needed: &'static str,
+    /// Destination type label.
+    pub destination_type: &'static str,
+    /// Destination type: local.
+    pub local: &'static str,
+    /// Destination type: SFTP.
+    pub sftp: &'static str,
+    /// SFTP host field.
+    pub sftp_host: &'static str,
+    /// SFTP port field.
+    pub sftp_port: &'static str,
+    /// SFTP username field.
+    pub sftp_user: &'static str,
+    /// SFTP private key field.
+    pub sftp_key: &'static str,
+    /// SFTP remote directory field.
+    pub sftp_root: &'static str,
+    /// Browse button.
+    pub browse: &'static str,
+    /// Excludes input label.
+    pub excludes: &'static str,
+    /// Excludes placeholder/help.
+    pub excludes_help: &'static str,
+    /// Compression level label.
+    pub compression: &'static str,
+    /// Edit job button.
+    pub edit: &'static str,
+    /// Save job button.
+    pub save: &'static str,
+    /// Job updated toast.
+    pub job_updated: &'static str,
+    /// Initialize repository button.
+    pub init_repo: &'static str,
+    /// Repository initialized toast.
+    pub repo_initialized: &'static str,
 }
 
 /// French strings.
@@ -203,6 +237,23 @@ pub const FR: Texts = Texts {
     verify: "Vérifier",
     selected_files: "fichiers sélectionnés",
     passphrase_needed: "Définissez la phrase secrète dans Paramètres.",
+    destination_type: "Type de destination",
+    local: "Disque local / USB",
+    sftp: "Serveur SFTP",
+    sftp_host: "Hôte SFTP (ex. backup.example.com)",
+    sftp_port: "Port (défaut 22)",
+    sftp_user: "Utilisateur SSH",
+    sftp_key: "Clé privée SSH (id_ed25519…)",
+    sftp_root: "Dépôt distant (ex. /data/backup)",
+    browse: "Parcourir…",
+    excludes: "Exclusions (motifs séparés par des virgules)",
+    excludes_help: "target, node_modules, .git, *.tmp",
+    compression: "Niveau de compression zstd",
+    edit: "Modifier",
+    save: "Enregistrer",
+    job_updated: "Configuration mise à jour",
+    init_repo: "Initialiser le dépôt",
+    repo_initialized: "Dépôt initialisé avec succès",
 };
 
 /// English strings.
@@ -269,6 +320,23 @@ pub const EN: Texts = Texts {
     verify: "Verify",
     selected_files: "files selected",
     passphrase_needed: "Set the passphrase in Settings.",
+    destination_type: "Destination type",
+    local: "Local disk / USB",
+    sftp: "SFTP server",
+    sftp_host: "SFTP host (e.g. backup.example.com)",
+    sftp_port: "Port (default 22)",
+    sftp_user: "SSH username",
+    sftp_key: "SSH private key (id_ed25519…)",
+    sftp_root: "Remote repository path (e.g. /data/backup)",
+    browse: "Browse…",
+    excludes: "Excludes (comma-separated patterns)",
+    excludes_help: "target, node_modules, .git, *.tmp",
+    compression: "zstd compression level",
+    edit: "Edit",
+    save: "Save",
+    job_updated: "Job updated",
+    init_repo: "Initialize repository",
+    repo_initialized: "Repository initialized successfully",
 };
 
 impl Lang {

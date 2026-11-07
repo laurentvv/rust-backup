@@ -110,8 +110,23 @@ impl BackupRunner {
 
     fn run(&self, job: &JobConfig, passphrase: &str) -> Result<(Uuid, BackupStats), String> {
         let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
-        let repo =
-            rb_core::repo::Repository::open(backend, passphrase).map_err(|e| e.to_string())?;
+        let repo = match rb_core::repo::Repository::open(Arc::clone(&backend), passphrase) {
+            Ok(r) => r,
+            Err(e) => {
+                if !backend.exists("config.json").unwrap_or(false) {
+                    rb_core::repo::Repository::init(
+                        backend,
+                        passphrase,
+                        rb_core::chunker::ChunkerConfig::default(),
+                        job.compression_level,
+                        rb_core::crypto::KdfParams::default(),
+                    )
+                    .map_err(|init_err| format!("Auto-init failed: {init_err}"))?
+                } else {
+                    return Err(e.to_string());
+                }
+            }
+        };
         let tx = self.tx.clone();
         let (manifest, stats) = run_backup(
             &repo,
@@ -130,6 +145,33 @@ impl BackupRunner {
         .map_err(|e| e.to_string())?;
         Ok((manifest.id, stats))
     }
+}
+
+/// Initializes a repository explicitly for a job destination.
+pub fn spawn_init_repo(
+    job: JobConfig,
+    passphrase: String,
+) -> flume::Receiver<Result<String, String>> {
+    let (tx, rx) = flume::unbounded();
+    std::thread::spawn(move || {
+        let result = (|| {
+            let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
+            if backend.exists("config.json").unwrap_or(false) {
+                return Err("Repository already exists at destination".into());
+            }
+            let repo = rb_core::repo::Repository::init(
+                backend,
+                &passphrase,
+                rb_core::chunker::ChunkerConfig::default(),
+                job.compression_level,
+                rb_core::crypto::KdfParams::default(),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(format!("Repository initialized (key: {})", repo.key_id()))
+        })();
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 /// Builds a storage backend for a destination (TOFU known-hosts for SFTP).

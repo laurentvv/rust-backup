@@ -122,10 +122,24 @@ pub fn run_backup(
     for source_root in &job.sources {
         let root_key = source_root.to_string_lossy().to_string();
         let mut entries: Vec<FileEntry> = Vec::new();
+        let excludes = &job.excludes;
 
         for walk_entry in WalkDir::new(source_root)
             .follow_links(false)
             .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|entry| {
+                if let Ok(rel) = entry.path().strip_prefix(source_root)
+                    && !rel.as_os_str().is_empty()
+                {
+                    for pat in excludes {
+                        if crate::domain::matches_exclude(rel, pat) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
         {
             if is_cancelled(&cancel) {
                 return Err(crate::Error::Cancelled);

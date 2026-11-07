@@ -539,6 +539,7 @@ fn sftp_backup_verify_restore_roundtrip() {
                 .to_string(),
         },
         compression_level: 5,
+        excludes: vec![],
         created_at: chrono::Utc::now(),
     };
 

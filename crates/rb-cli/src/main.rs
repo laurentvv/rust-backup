@@ -148,6 +148,9 @@ enum JobsAction {
         /// Repository root on the SFTP server.
         #[arg(long)]
         sftp_root: Option<String>,
+        /// File/directory name or wildcard pattern to exclude (repeatable).
+        #[arg(long = "exclude")]
+        excludes: Vec<String>,
     },
     /// List configured jobs.
     List,
@@ -193,6 +196,7 @@ fn main() -> anyhow::Result<()> {
                 sftp_user,
                 sftp_key,
                 sftp_root,
+                excludes,
             } => {
                 let catalog = Catalog::open(&db_path)?;
                 let destination = build_destination(
@@ -204,6 +208,7 @@ fn main() -> anyhow::Result<()> {
                     sources,
                     destination,
                     compression_level: compression,
+                    excludes,
                     created_at: chrono_now(),
                 };
                 job.validate().map_err(|e| anyhow::anyhow!(e))?;

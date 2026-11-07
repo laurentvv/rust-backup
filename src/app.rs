@@ -13,7 +13,7 @@ use gpui_kit::component::sidebar::{
     Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
 };
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme, Icon, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Theme, ThemeMode, TitleBar, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -101,6 +101,8 @@ pub struct RustBackupApp {
     restore_overwrite: bool,
     restore_busy: bool,
     restore_result: Option<(bool, String)>,
+    dark: bool,
+    run_est_files: u64,
 }
 
 impl RustBackupApp {
@@ -140,7 +142,11 @@ impl RustBackupApp {
             restore_overwrite: false,
             restore_busy: false,
             restore_result: None,
+            dark: false,
+            run_est_files: 0,
         };
+        // Palette applied once at startup; runtime switching happens in
+        // Settings via Theme::change (dark stays the stock dark theme).
         app.refresh_catalog();
         app
     }
@@ -235,6 +241,13 @@ impl RustBackupApp {
         self.run_bytes_new = 0;
         self.run_skipped = 0;
         self.run_current_file.clear();
+        // Estimated total from the latest cached snapshot (0 = unknown).
+        self.run_est_files = self
+            .catalog_path()
+            .and_then(|path| Catalog::open(&path).ok())
+            .and_then(|catalog| catalog.list_snapshots(job_id).ok())
+            .and_then(|snapshots| snapshots.first().map(|s| s.files_total))
+            .unwrap_or(0);
         self.cancel = Some(cancel);
         self.section = Section::Run;
         self.toast = None;
@@ -498,12 +511,32 @@ impl RustBackupApp {
         };
         match Catalog::open(&path).and_then(|catalog| catalog.insert_job(&job).map(|_| catalog)) {
             Ok(_) => {
+                // Insert in place: a second catalog re-open right after the
+                // insert connection closes is the fragile path (silently
+                // bailed on DuckDB file-lock timing), which left the list
+                // stale (bug caught by the GUI walkthrough).
+                self.jobs.push(job.clone());
+                self.jobs.sort_by(|a, b| a.name.cmp(&b.name));
                 self.toast = Some((false, format!("{} ✓ {}", self.texts().create, job.name)));
-                self.refresh_catalog();
             }
             Err(e) => self.toast = Some((true, e.to_string())),
         }
+        self.auto_dismiss_toast(cx);
         cx.notify();
+    }
+
+    /// Clears the current toast after a few seconds.
+    fn auto_dismiss_toast(&self, cx: &mut gpui::Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.toast = None;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn delete_job(
@@ -516,7 +549,8 @@ impl RustBackupApp {
             && let Ok(catalog) = Catalog::open(&path)
             && catalog.delete_job(job_id).unwrap_or(false)
         {
-            self.refresh_catalog();
+            self.jobs.retain(|job| job.id != job_id);
+            self.recent_runs.retain(|(_, run)| run.job_id != job_id);
         }
         cx.notify();
     }
@@ -532,11 +566,13 @@ impl RustBackupApp {
     // Rendering
     // -----------------------------------------------------------------
 
+    #[allow(clippy::too_many_lines)]
     fn stat_card(
         &self,
         title: &str,
         value: &str,
         icon: IconName,
+        accent: gpui::Hsla,
         cx: &gpui::Context<Self>,
     ) -> impl IntoElement {
         div()
@@ -552,9 +588,13 @@ impl RustBackupApp {
                     .gap_3()
                     .child(
                         div()
+                            .id(gpui::SharedString::new(format!("chip-{title}")))
                             .p_2()
                             .rounded_md()
-                            .bg(cx.theme().selection)
+                            .bg(accent.opacity(0.16))
+                            .border_1()
+                            .border_color(accent.opacity(0.35))
+                            .text_color(accent)
                             .child(Icon::new(icon).size_5()),
                     )
                     .child(
@@ -575,20 +615,121 @@ impl RustBackupApp {
             )
     }
 
+    /// Horizontal bar chart of the most recent runs (protected volume per
+    /// run, green = success, red = failed).
+    fn recent_runs_chart(&self, cx: &gpui::Context<Self>) -> impl IntoElement {
+        let t = self.texts();
+        let runs: Vec<&(String, RunRecord)> = self.recent_runs.iter().take(8).collect();
+        let max_bytes = runs
+            .iter()
+            .map(|(_, r)| r.bytes_total)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let mut list = v_flex().gap_1();
+        for (job, run) in runs {
+            let frac = (run.bytes_total as f64 / max_bytes as f64).clamp(0.02, 1.0);
+            let color = if run.status == RunStatus::Success {
+                cx.theme().success
+            } else {
+                cx.theme().danger
+            };
+            list = list.child(
+                h_flex()
+                    .id(gpui::SharedString::new(run.id.to_string()))
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(150.0))
+                            .text_size(px(11.0))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(job.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(14.0))
+                            .rounded_full()
+                            .bg(cx.theme().selection.opacity(0.5))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(relative(frac as f32))
+                                    .rounded_full()
+                                    .bg(color.opacity(0.85)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(90.0))
+                            .justify_end()
+                            .text_size(px(11.0))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(human_bytes(run.bytes_total)),
+                    ),
+            );
+        }
+        v_flex()
+            .gap_2()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_color(cx.theme().primary)
+                            .child(Icon::new(IconName::ChartColumn).size_4()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(cx.theme().foreground)
+                            .child(t.history),
+                    ),
+            )
+            .child(list)
+    }
+
+    /// Small icon + title header for a section.
+    fn section_header(
+        &self,
+        icon: IconName,
+        title: &str,
+        cx: &gpui::Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .gap_3()
+            .child(
+                div()
+                    .p_2()
+                    .rounded_lg()
+                    .bg(cx.theme().primary.opacity(0.15))
+                    .border_1()
+                    .border_color(cx.theme().primary.opacity(0.35))
+                    .text_color(cx.theme().primary)
+                    .child(Icon::new(icon).size_5()),
+            )
+            .child(
+                div()
+                    .text_size(px(24.0))
+                    .text_color(cx.theme().foreground)
+                    .child(title.to_string()),
+            )
+    }
+
     fn render_dashboard(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let t = self.texts();
         let last_run_label = self
             .recent_runs
             .first()
-            .map(|(job, run)| {
-                format!(
-                    "{} · {}",
-                    job,
-                    match run.status {
-                        RunStatus::Success => t.success,
-                        RunStatus::Failed => t.failed,
-                    }
-                )
+            .map(|(_, run)| match run.status {
+                RunStatus::Success => t.success.to_string(),
+                RunStatus::Failed => t.failed.to_string(),
             })
             .unwrap_or_else(|| t.idle.to_string());
         let protected: u64 = self
@@ -620,22 +761,34 @@ impl RustBackupApp {
                         t.jobs_count,
                         &self.jobs.len().to_string(),
                         IconName::Database,
+                        cx.theme().primary,
                         cx,
                     ))
                     .child(self.stat_card(
                         t.snapshots_count,
                         &self.snapshot_count().to_string(),
                         IconName::Layers,
+                        cx.theme().success,
                         cx,
                     ))
-                    .child(self.stat_card(t.last_run, &last_run_label, IconName::Clock, cx))
+                    .child(self.stat_card(
+                        t.last_run,
+                        &last_run_label,
+                        IconName::Clock,
+                        cx.theme().warning,
+                        cx,
+                    ))
                     .child(self.stat_card(
                         t.protected_volume,
                         &human_bytes(protected),
                         IconName::ShieldCheck,
+                        cx.theme().danger,
                         cx,
                     )),
             )
+            .when(!self.recent_runs.is_empty(), |this| {
+                this.child(self.recent_runs_chart(cx))
+            })
     }
 
     fn render_jobs(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
@@ -774,9 +927,18 @@ impl RustBackupApp {
                 .border_dashed()
                 .border_color(cx.theme().border)
                 .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(t.no_jobs),
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(Icon::new(IconName::Folder).size_4()),
+                        )
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(t.no_jobs),
+                        ),
                 )
                 .into_any_element()
         } else {
@@ -785,12 +947,7 @@ impl RustBackupApp {
 
         v_flex()
             .gap_4()
-            .child(
-                div()
-                    .text_size(px(24.0))
-                    .text_color(cx.theme().foreground)
-                    .child(t.jobs),
-            )
+            .child(self.section_header(IconName::Database, t.jobs, cx))
             .child(list)
             .child(form)
     }
@@ -828,12 +985,70 @@ impl RustBackupApp {
 
         let running = matches!(self.phase, RunPhase::Running { .. });
 
+        let (frac, pct_label) = if self.run_est_files > 0 {
+            let frac = (self.run_files_done as f64 / self.run_est_files as f64).clamp(0.0, 0.99);
+            (
+                frac as f32,
+                format!("{} / ≈{}", self.run_files_done, self.run_est_files),
+            )
+        } else {
+            (0.05f32, format!("{} / ?", self.run_files_done))
+        };
+        let progress = v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(pct_label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{:.0} %", frac * 100.0)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("run-progress")
+                    .w_full()
+                    .h(px(10.0))
+                    .rounded_full()
+                    .bg(cx.theme().selection.opacity(0.6))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(frac))
+                            .rounded_full()
+                            .bg(if running {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().success
+                            }),
+                    ),
+            );
+
         v_flex()
             .gap_4()
             .child(
                 h_flex()
                     .gap_3()
                     .items_center()
+                    .child(
+                        div()
+                            .p_2()
+                            .rounded_lg()
+                            .bg(cx.theme().primary.opacity(0.15))
+                            .border_1()
+                            .border_color(cx.theme().primary.opacity(0.35))
+                            .text_color(cx.theme().primary)
+                            .child(Icon::new(IconName::Play).size_5()),
+                    )
                     .child(
                         div()
                             .text_size(px(24.0))
@@ -855,6 +1070,7 @@ impl RustBackupApp {
                         .child(message),
                 )
             })
+            .child(progress)
             .child(
                 h_flex()
                     .gap_3()
@@ -863,24 +1079,28 @@ impl RustBackupApp {
                         t.files_done,
                         &self.run_files_done.to_string(),
                         IconName::Files,
+                        cx.theme().primary,
                         cx,
                     ))
                     .child(self.stat_card(
                         t.new_chunks,
                         &self.run_chunks_new.to_string(),
                         IconName::Package,
+                        cx.theme().success,
                         cx,
                     ))
                     .child(self.stat_card(
                         t.bytes_processed,
                         &human_bytes(self.run_bytes_done),
                         IconName::HardDrive,
+                        cx.theme().warning,
                         cx,
                     ))
                     .child(self.stat_card(
                         t.skipped,
                         &self.run_skipped.to_string(),
                         IconName::TriangleAlert,
+                        cx.theme().danger,
                         cx,
                     )),
             )
@@ -1040,12 +1260,7 @@ impl RustBackupApp {
 
         v_flex()
             .gap_4()
-            .child(
-                div()
-                    .text_size(px(24.0))
-                    .text_color(cx.theme().foreground)
-                    .child(t.restore),
-            )
+            .child(self.section_header(IconName::Archive, t.restore, cx))
             .when_some(banner, |this, b| this.child(b))
             .child(
                 Button::new("reload-snapshots")
@@ -1260,12 +1475,7 @@ impl RustBackupApp {
 
         v_flex()
             .gap_4()
-            .child(
-                div()
-                    .text_size(px(24.0))
-                    .text_color(cx.theme().foreground)
-                    .child(t.history),
-            )
+            .child(self.section_header(IconName::Clock, t.history, cx))
             .child(
                 v_flex()
                     .p_2()
@@ -1282,12 +1492,7 @@ impl RustBackupApp {
         let t = self.texts();
         v_flex()
             .gap_4()
-            .child(
-                div()
-                    .text_size(px(24.0))
-                    .text_color(cx.theme().foreground)
-                    .child(t.settings),
-            )
+            .child(self.section_header(IconName::Settings, t.settings, cx))
             .child(
                 v_flex()
                     .gap_2()
@@ -1320,6 +1525,54 @@ impl RustBackupApp {
                                     .when(self.lang == Lang::En, |b| b.primary())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.lang = Lang::En;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(Icon::new(IconName::Eye).size_4()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .text_color(cx.theme().foreground)
+                                    .child("Thème / Theme"),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("theme-dark")
+                                    .label("Sombre / Dark")
+                                    .when(self.dark, |b| b.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.dark = true;
+                                        Theme::change(ThemeMode::Dark, None, cx);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("theme-light")
+                                    .label("Clair / Light")
+                                    .when(!self.dark, |b| b.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.dark = false;
+                                        Theme::change(ThemeMode::Light, None, cx);
                                         cx.notify();
                                     })),
                             ),
@@ -1400,10 +1653,15 @@ impl gpui::Render for RustBackupApp {
                 SidebarHeader::new().child(
                     h_flex()
                         .gap_2()
-                        .child(Icon::new(IconName::ShieldCheck).size_5())
+                        .child(
+                            svg()
+                                .path("icons/brand-mark.svg")
+                                .size_6()
+                                .text_color(gpui::rgb(0x0B8F80)),
+                        )
                         .child(
                             div()
-                                .text_size(px(15.0))
+                                .text_size(px(16.0))
                                 .text_color(cx.theme().foreground)
                                 .child("RustBackup"),
                         ),

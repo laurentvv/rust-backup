@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14E0C8"/>
+      <stop offset="1" stop-color="#0B8F80"/>
+    </linearGradient>
+    <linearGradient id="inner" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0E1B26"/>
+      <stop offset="1" stop-color="#132B36"/>
+    </linearGradient>
+  </defs>
+  <!-- shield body -->
+  <path d="M64 6 L116 24 V62 C116 90 94 110 64 122 C34 110 12 90 12 62 V24 Z"
+        fill="url(#shield)"/>
+  <path d="M64 14 L108 29 V62 C108 85 89 103 64 113 C39 103 20 85 20 62 V29 Z"
+        fill="url(#inner)"/>
+  <!-- database cylinder (3 discs) -->
+  <g stroke="#14E0C8" stroke-width="5" fill="none">
+    <ellipse cx="64" cy="45" rx="26" ry="10"/>
+    <path d="M38 45 V74 C38 80 50 85 64 85 C78 85 90 80 90 74 V45"/>
+    <path d="M38 59 C38 65 50 70 64 70 C78 70 90 65 90 59"/>
+  </g>
+  <!-- restore cycle arrow -->
+  <g stroke="#F5B84C" stroke-width="6" fill="none" stroke-linecap="round">
+    <path d="M92 92 A30 30 0 0 1 40 96"/>
+    <path d="M92 92 L92 78 M92 92 L78 92" stroke-width="7"/>
+  </g>
+</svg>

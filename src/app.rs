@@ -7,13 +7,16 @@ use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::notification::NotificationType;
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
 };
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme, Icon, TitleBar, h_flex, v_flex};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{ActiveTheme, Icon, TitleBar, WindowExt, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -41,6 +44,19 @@ pub enum Section {
     /// Settings.
     Settings,
 }
+
+actions!(
+    rust_backup,
+    [
+        StartBackupAction,
+        FocusSearchAction,
+        OpenSettingsAction,
+        GoDashboardAction,
+        GoJobsAction,
+        GoRestoreAction,
+        GoHistoryAction,
+    ]
+);
 
 /// Phase of the current (or last) run.
 #[derive(Debug, Clone)]
@@ -142,6 +158,7 @@ pub struct RustBackupApp {
 
     // --- history tab ---
     history_tab: HistoryTab,
+    focus_handle: gpui::FocusHandle,
 
     dark: bool,
     run_est_files: u64,
@@ -230,6 +247,9 @@ fn build_restore_tree(entries: &[(String, String, u64)], search: &str) -> (Resto
 impl RustBackupApp {
     /// Builds the view, loading the local catalog.
     pub fn new(window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
+
         let mut app = Self {
             section: Section::Dashboard,
             lang: Lang::default(),
@@ -297,6 +317,7 @@ impl RustBackupApp {
             verify_progress: None,
             verify_outcomes: Vec::new(),
             history_tab: HistoryTab::Runs,
+            focus_handle,
             dark: false,
             run_est_files: 0,
             cached_snapshot_count: 0,
@@ -1053,16 +1074,18 @@ impl RustBackupApp {
 
     fn delete_job(
         &mut self,
-        _window: &mut gpui::Window,
+        window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
         job_id: JobId,
     ) {
+        let t = self.texts();
         if let Some(path) = self.catalog_path()
             && let Ok(catalog) = Catalog::open(&path)
             && catalog.delete_job(job_id).unwrap_or(false)
         {
             self.jobs.retain(|job| job.id != job_id);
             self.recent_runs.retain(|(_, run)| run.job_id != job_id);
+            window.push_notification((NotificationType::Success, t.job_deleted), cx);
         }
         cx.notify();
     }
@@ -1469,8 +1492,33 @@ impl RustBackupApp {
                                     )))
                                     .ghost()
                                     .icon(IconName::Trash)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.delete_job(window, cx, id);
+                                    .on_click(cx.listener({
+                                        let jname = job.name.clone();
+                                        let entity = cx.entity().clone();
+                                        move |this, _, window, cx| {
+                                            let name = jname.clone();
+                                            let entity = entity.clone();
+                                            let t = this.texts();
+                                            window.open_alert_dialog(cx, move |alert, _, _| {
+                                                let target = entity.clone();
+                                                alert
+                                                    .title(t.confirm_delete)
+                                                    .description(format!(
+                                                        "{} \"{}\"",
+                                                        t.confirm_delete_desc, name
+                                                    ))
+                                                    .confirm()
+                                                    .ok_text(t.delete)
+                                                    .ok_variant(ButtonVariant::Danger)
+                                                    .cancel_text(t.cancel)
+                                                    .on_ok(move |_, window, cx| {
+                                                        target.update(cx, |this, cx| {
+                                                            this.delete_job(window, cx, id);
+                                                        });
+                                                        true
+                                                    })
+                                            });
+                                        }
                                     })),
                                 ),
                         )
@@ -1602,33 +1650,22 @@ impl RustBackupApp {
                 )
                 .child(
                     v_flex()
-                        .gap_1()
+                        .gap_2()
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .child(t.destination_type.to_string()),
                         )
                         .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("dest-type-local")
-                                        .label(t.local)
-                                        .when(!self.form_is_sftp, |b| b.primary())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.form_is_sftp = false;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    Button::new("dest-type-sftp")
-                                        .label(t.sftp)
-                                        .when(self.form_is_sftp, |b| b.primary())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.form_is_sftp = true;
-                                            cx.notify();
-                                        })),
-                                ),
+                            h_flex().gap_3().items_center().child(
+                                Switch::new("form-sftp-switch")
+                                    .checked(self.form_is_sftp)
+                                    .label(if self.form_is_sftp { t.sftp } else { t.local })
+                                    .on_change(cx.listener(|this, checked, _, cx| {
+                                        this.form_is_sftp = *checked;
+                                        cx.notify();
+                                    })),
+                            ),
                         ),
                 )
                 .when(!self.form_is_sftp, |this| {
@@ -2745,17 +2782,11 @@ impl RustBackupApp {
                             )
                         })
                         .child(
-                            Button::new("toggle-overwrite")
-                                .ghost()
-                                .when(self.restore_overwrite, |b| b.primary())
-                                .icon(if self.restore_overwrite {
-                                    IconName::Check
-                                } else {
-                                    IconName::Square
-                                })
+                            Switch::new("toggle-overwrite")
+                                .checked(self.restore_overwrite)
                                 .label(t.overwrite_files)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.restore_overwrite = !this.restore_overwrite;
+                                .on_change(cx.listener(|this, checked, _, cx| {
+                                    this.restore_overwrite = *checked;
                                     cx.notify();
                                 })),
                         )
@@ -3055,9 +3086,25 @@ impl RustBackupApp {
                     )
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap_4()
+                            .items_center()
+                            .child(
+                                Switch::new("theme-switch")
+                                    .checked(self.dark)
+                                    .label(if self.dark {
+                                        t.theme_dark
+                                    } else {
+                                        t.theme_light
+                                    })
+                                    .on_change(cx.listener(|this, checked, _, cx| {
+                                        this.dark = *checked;
+                                        theme::apply_brand_theme(this.dark, cx);
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 Button::new("theme-dark")
+                                    .ghost()
                                     .label(t.theme_dark)
                                     .when(self.dark, |b| b.primary())
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -3068,6 +3115,7 @@ impl RustBackupApp {
                             )
                             .child(
                                 Button::new("theme-light")
+                                    .ghost()
                                     .label(t.theme_light)
                                     .when(!self.dark, |b| b.primary())
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -3137,15 +3185,23 @@ impl gpui::Render for RustBackupApp {
         let t = self.texts();
         let active = self.section;
 
-        let menu_item = |label: &str, icon: IconName, section: Section, is_active: bool| {
+        let menu_item = |label: &str,
+                         icon: IconName,
+                         section: Section,
+                         is_active: bool,
+                         shortcut: Option<&'static str>| {
             let label = label.to_string();
-            SidebarMenuItem::new(label.as_str())
+            let mut item = SidebarMenuItem::new(label.as_str())
                 .icon(icon)
                 .active(is_active)
                 .on_click(cx.listener(move |this, _, _window, cx| {
                     this.section = section;
                     cx.notify();
-                }))
+                }));
+            if let Some(sc) = shortcut {
+                item = item.suffix(move |_, _| Kbd::new(gpui::Keystroke::parse(sc).unwrap()));
+            }
+            item
         };
 
         let (lock_icon, lock_label, lock_color) =
@@ -3179,36 +3235,42 @@ impl gpui::Render for RustBackupApp {
                             IconName::LayoutDashboard,
                             Section::Dashboard,
                             active == Section::Dashboard,
+                            Some("ctrl-1"),
                         ))
                         .child(menu_item(
                             t.jobs,
                             IconName::Database,
                             Section::Jobs,
                             active == Section::Jobs,
+                            Some("ctrl-2"),
                         ))
                         .child(menu_item(
                             t.run,
                             IconName::Play,
                             Section::Run,
                             active == Section::Run,
+                            Some("ctrl-b"),
                         ))
                         .child(menu_item(
                             t.restore,
                             IconName::Archive,
                             Section::Restore,
                             active == Section::Restore,
+                            Some("ctrl-3"),
                         ))
                         .child(menu_item(
                             t.history,
                             IconName::Clock,
                             Section::History,
                             active == Section::History,
+                            Some("ctrl-4"),
                         ))
                         .child(menu_item(
                             t.settings,
                             IconName::Settings,
                             Section::Settings,
                             active == Section::Settings,
+                            Some("ctrl-,"),
                         )),
                 ),
             )
@@ -3263,6 +3325,31 @@ impl gpui::Render for RustBackupApp {
         });
 
         div()
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &GoDashboardAction, _, cx| {
+                this.section = Section::Dashboard;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoJobsAction, _, cx| {
+                this.section = Section::Jobs;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoRestoreAction, _, cx| {
+                this.section = Section::Restore;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoHistoryAction, _, cx| {
+                this.section = Section::History;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettingsAction, _, cx| {
+                this.section = Section::Settings;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &StartBackupAction, _, cx| {
+                this.section = Section::Run;
+                cx.notify();
+            }))
             .size_full()
             .flex()
             .flex_col()

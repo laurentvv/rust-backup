@@ -9,7 +9,7 @@ use std::borrow::Cow;
 
 use gpui_kit::assets::{Assets as ComponentAssets, icon_assets};
 use gpui_kit::component::TitleBar;
-use gpui_kit::gpui::{AppContext, AssetSource, Result, SharedString};
+use gpui_kit::gpui::{AppContext, AssetSource, KeyBinding, Result, SharedString};
 use gpui_kit::{application, init, open_window};
 
 // Extra Lucide icons beyond the default component set (embedded on purpose:
@@ -84,6 +84,16 @@ impl AssetSource for AppAssets {
 fn main() {
     application().with_assets(AppAssets).run(|cx| {
         init(cx);
+
+        // Global keyboard shortcuts
+        cx.bind_keys([
+            KeyBinding::new("ctrl-1", app::GoDashboardAction, None),
+            KeyBinding::new("ctrl-2", app::GoJobsAction, None),
+            KeyBinding::new("ctrl-3", app::GoRestoreAction, None),
+            KeyBinding::new("ctrl-4", app::GoHistoryAction, None),
+            KeyBinding::new("ctrl-b", app::StartBackupAction, None),
+            KeyBinding::new("ctrl-,", app::OpenSettingsAction, None),
+        ]);
 
         // Signature palette: steel-blue tinted light theme by default;
         // switching to dark mode retains the deep slate palette.

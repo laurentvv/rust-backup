@@ -12,6 +12,7 @@ pub enum Lang {
 
 /// All UI strings for one language.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct Texts {
     /// Section: dashboard.
     pub dashboard: &'static str,
@@ -171,6 +172,44 @@ pub struct Texts {
     pub init_repo: &'static str,
     /// Repository initialized toast.
     pub repo_initialized: &'static str,
+    /// Quick verification option.
+    pub verify_quick: &'static str,
+    /// Full verification option.
+    pub verify_full: &'static str,
+    /// Verification mode label.
+    pub verify_mode: &'static str,
+    /// Verification running banner/toast.
+    pub verify_running: &'static str,
+    /// Verification cancelled.
+    pub verify_cancelled: &'static str,
+    /// Backup history tab.
+    pub backup_history: &'static str,
+    /// Verification history tab.
+    pub verify_history: &'static str,
+    /// No verification history.
+    pub no_verify_history: &'static str,
+    /// Integrity OK.
+    pub integrity_ok: &'static str,
+    /// Integrity issues found.
+    pub issues_found: &'static str,
+    /// Chunks checked label.
+    pub chunks_checked: &'static str,
+    /// Orphan chunks label.
+    pub orphan_chunks: &'static str,
+    /// Tree view button.
+    pub tree_view: &'static str,
+    /// Flat view button.
+    pub flat_view: &'static str,
+    /// Expand all button.
+    pub expand_all: &'static str,
+    /// Collapse all button.
+    pub collapse_all: &'static str,
+    /// Restoring progress.
+    pub restoring: &'static str,
+    /// Cancel restore button.
+    pub cancel_restore: &'static str,
+    /// Restore cancelled.
+    pub restore_cancelled: &'static str,
 }
 
 /// French strings.
@@ -254,6 +293,25 @@ pub const FR: Texts = Texts {
     job_updated: "Configuration mise à jour",
     init_repo: "Initialiser le dépôt",
     repo_initialized: "Dépôt initialisé avec succès",
+    verify_quick: "Rapide (métadonnées)",
+    verify_full: "Complète (hachage BLAKE3)",
+    verify_mode: "Mode de vérification",
+    verify_running: "Vérification d'intégrité en cours…",
+    verify_cancelled: "Vérification annulée",
+    backup_history: "Sauvegardes",
+    verify_history: "Vérifications d'intégrité",
+    no_verify_history: "Aucune vérification enregistrée.",
+    integrity_ok: "Intégrité validée",
+    issues_found: "Problèmes détectés",
+    chunks_checked: "fragments vérifiés",
+    orphan_chunks: "fragments orphelins",
+    tree_view: "Arborescence",
+    flat_view: "Liste",
+    expand_all: "Tout déplier",
+    collapse_all: "Tout replier",
+    restoring: "Restauration en cours…",
+    cancel_restore: "Annuler la restauration",
+    restore_cancelled: "Restauration annulée",
 };
 
 /// English strings.
@@ -337,6 +395,25 @@ pub const EN: Texts = Texts {
     job_updated: "Job updated",
     init_repo: "Initialize repository",
     repo_initialized: "Repository initialized successfully",
+    verify_quick: "Quick (metadata)",
+    verify_full: "Full (BLAKE3 hash)",
+    verify_mode: "Verification mode",
+    verify_running: "Integrity verification in progress…",
+    verify_cancelled: "Verification cancelled",
+    backup_history: "Backups",
+    verify_history: "Integrity verifications",
+    no_verify_history: "No verification recorded yet.",
+    integrity_ok: "Integrity verified",
+    issues_found: "Issues detected",
+    chunks_checked: "chunks checked",
+    orphan_chunks: "orphan chunks",
+    tree_view: "Tree view",
+    flat_view: "Flat list",
+    expand_all: "Expand all",
+    collapse_all: "Collapse all",
+    restoring: "Restoring files…",
+    cancel_restore: "Cancel restore",
+    restore_cancelled: "Restore cancelled",
 };
 
 impl Lang {

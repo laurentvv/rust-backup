@@ -30,8 +30,12 @@ pub trait StorageBackend: Send + Sync {
     /// unreadable.
     fn read(&self, rel: &str) -> crate::Result<Vec<u8>>;
 
-    /// Atomically writes `data` at `rel` (write to a temp name, then
-    /// rename into place), creating parent directories as needed.
+    /// Atomically and durably writes `data` at `rel`: write to a temp name in
+    /// the same directory, flush it to stable storage, then rename it into
+    /// place, creating parent directories as needed. On failure the temp file
+    /// is removed (best effort); temp names contain `.tmp-` so that
+    /// [`Repository::prune_orphans`](crate::repo::Repository::prune_orphans)
+    /// can sweep leftovers from crashed runs.
     ///
     /// # Errors
     ///

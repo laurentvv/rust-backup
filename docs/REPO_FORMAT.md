@@ -52,7 +52,9 @@ Associated data = `"RBSN" ‖ snapshot-uuid ‖ plain_len`. The JSON manifest (`
 
 ## Atomicity
 
-- Chunks: written to `<name>.tmp-<uuid>` then renamed; a crash never leaves a half chunk at its final name.
+- Every file (chunk, manifest, lock) is written to a temp name containing `.tmp-<uuid>` in the same directory (`<stem>.tmp-<uuid>` on LocalFs, `<name>.tmp-<uuid>` over SFTP), **flushed to stable storage** (`sync_all`; `fsync@openssh.com` over SFTP when the server offers it), then renamed into place. A crash or a USB unplug never leaves a half-written file at its final name.
+- LocalFs renames over an existing target in one step (no window without the file). SFTP v3 cannot rename onto an existing name, so an overwrite there removes the target first; chunks and snapshot names are never overwritten in normal operation.
+- Leftover temp files from interrupted writes are swept by `prune` (under the exclusive lock), under `chunks/` and `snapshots/`.
 - Snapshots: the manifest is created only after every chunk of the run is stored, then atomically renamed — an interrupted run leaves unreferenced chunks (harmless, reused later) but **never** a complete-looking snapshot.
 
 ## Paths

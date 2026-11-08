@@ -463,8 +463,11 @@ fn main() -> anyhow::Result<()> {
                 })
                 .map_err(|e| anyhow::anyhow!(e))?;
             println!(
-                "prune complete: {} orphan chunks deleted ({} bytes freed), {} preserved",
-                report.chunks_deleted, report.bytes_freed, report.chunks_kept
+                "prune complete: {} orphan chunks deleted ({} bytes freed), {} preserved, {} leftover temp files removed",
+                report.chunks_deleted,
+                report.bytes_freed,
+                report.chunks_kept,
+                report.temp_files_removed
             );
         }
     }

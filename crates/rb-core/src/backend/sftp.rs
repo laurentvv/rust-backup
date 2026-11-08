@@ -139,24 +139,37 @@ impl StorageBackend for SftpBackend {
             if let Some(parent) = parent_of(&path) {
                 mkdirs_remote(&sftp, &parent).await?;
             }
-            // Write the full content under a temp name...
-            let mut file = sftp
-                .open_with_flags(
-                    &tmp,
-                    russh_sftp::protocol::OpenFlags::CREATE
-                        | russh_sftp::protocol::OpenFlags::WRITE
-                        | russh_sftp::protocol::OpenFlags::TRUNCATE,
-                )
-                .await?;
-            file.write_all(&data).await?;
-            file.shutdown().await?;
-
-            // Rename into place (atomic); replace any previous version.
-            if sftp.metadata(&path).await.is_ok() {
-                sftp.remove_file(&path).await?;
+            // Write the full content under a temp name and flush it to the
+            // server's disk (`fsync@openssh.com`; russh-sftp turns this into a
+            // no-op when the server lacks the extension).
+            let written: crate::Result<()> = async {
+                let mut file = sftp
+                    .open_with_flags(
+                        &tmp,
+                        russh_sftp::protocol::OpenFlags::CREATE
+                            | russh_sftp::protocol::OpenFlags::WRITE
+                            | russh_sftp::protocol::OpenFlags::TRUNCATE,
+                    )
+                    .await?;
+                file.write_all(&data).await?;
+                file.sync_all().await?;
+                file.shutdown().await?;
+                // SFTP v3 RENAME refuses an existing target and russh-sftp has
+                // no `posix-rename@openssh.com`, so an overwrite must remove
+                // first. Content-addressed chunks and fresh snapshot names are
+                // never overwritten in normal operation, so this window only
+                // concerns explicit rewrites.
+                if sftp.metadata(&path).await.is_ok() {
+                    sftp.remove_file(&path).await?;
+                }
+                sftp.rename(&tmp, &path).await?;
+                Ok(())
             }
-            sftp.rename(&tmp, &path).await?;
-            Ok(())
+            .await;
+            if written.is_err() {
+                let _ = sftp.remove_file(&tmp).await;
+            }
+            written
         })
     }
 

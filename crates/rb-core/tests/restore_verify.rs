@@ -334,6 +334,18 @@ fn verify_quick_passes_then_full_detects_and_names_corruption() {
             !final_path.exists(),
             "failed restore must leave no final file"
         );
+        // ...and no temp file either (the AEAD failure is an early `?`
+        // return inside restore_file: the RAII guard must clean up).
+        let leftovers: Vec<_> = walkdir::WalkDir::new(fixture.base.join("t2"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("rbrestore-"))
+            .map(|e| e.path().display().to_string())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed restore left temp files: {leftovers:?}"
+        );
     }
 }
 

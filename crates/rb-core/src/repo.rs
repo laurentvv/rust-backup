@@ -56,6 +56,9 @@ pub struct PruneReport {
     pub bytes_freed: u64,
     /// Number of chunks preserved (referenced by at least one snapshot).
     pub chunks_kept: u64,
+    /// Leftover temp files (`*.tmp-*`) from interrupted writes, removed.
+    #[serde(default)]
+    pub temp_files_removed: u64,
 }
 
 /// Exclusive lock information stored under `locks/<id>.json`.
@@ -537,6 +540,13 @@ impl Repository {
             }
             on_progress(ix as u64, total);
 
+            if is_temp_file(&rel) {
+                // Leftover of an interrupted write. Safe to delete: we hold
+                // the exclusive lock, so no writer is active right now.
+                self.backend.remove(&rel)?;
+                report.temp_files_removed += 1;
+                continue;
+            }
             if !rel.ends_with(".chunk") {
                 continue;
             }
@@ -554,6 +564,13 @@ impl Repository {
                     report.chunks_deleted += 1;
                     report.bytes_freed += len;
                 }
+            }
+        }
+        // 3. Interrupted snapshot writes leave temp files next to manifests.
+        for rel in self.backend.list("snapshots")? {
+            if is_temp_file(&rel) {
+                self.backend.remove(&rel)?;
+                report.temp_files_removed += 1;
             }
         }
         on_progress(total, total);
@@ -585,6 +602,14 @@ impl Repository {
         ad.extend_from_slice(&plain_len.to_be_bytes());
         ad
     }
+}
+
+/// True for temp names produced by `StorageBackend::write_atomic`
+/// (`<stem>.tmp-<uuid>` locally, `<name>.tmp-<uuid>` over SFTP).
+fn is_temp_file(rel: &str) -> bool {
+    rel.rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains(".tmp-"))
 }
 
 #[cfg(test)]
@@ -752,6 +777,51 @@ mod tests {
         assert_eq!(report.chunks_kept, 1);
         assert!(repo.chunk_exists(&hash1).expect("chunk1 exists"));
         assert!(!repo.chunk_exists(&hash2).expect("chunk2 pruned"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_removes_stale_temp_files() {
+        let (dir, repo) = temp_repo();
+        let data = vec![7u8; 500];
+        let hash = ChunkHash::from_data(&data);
+        repo.store_chunk(&hash, &data).expect("store");
+        let mut m = SnapshotManifest::new(Uuid::new_v4(), "job");
+        m.sources.push(crate::manifest::SourceSnapshot {
+            root: std::path::PathBuf::from(r"C:\test"),
+            entries: vec![crate::manifest::FileEntry {
+                path: std::path::PathBuf::from("f.bin"),
+                size: 500,
+                mtime_ns: 0,
+                chunks: vec![crate::manifest::ChunkRef {
+                    hash,
+                    plain_len: 500,
+                }],
+                kind: crate::manifest::EntryKind::File,
+            }],
+        });
+        repo.write_manifest(&m).expect("write m");
+
+        // Leftovers of interrupted writes, in both naming styles
+        // (LocalFs replaces the extension, SFTP appends it).
+        let backend = &repo.backend;
+        backend
+            .write_atomic("chunks/ab/abcd.tmp-0123", b"partial")
+            .expect("tmp chunk");
+        backend
+            .write_atomic("snapshots/dead.snap.tmp-4567", b"partial")
+            .expect("tmp snap");
+
+        let report = repo.prune_orphans(None, |_, _| {}).expect("prune");
+        assert_eq!(report.temp_files_removed, 2);
+        assert_eq!(report.chunks_kept, 1, "live chunk untouched");
+        assert!(!backend.exists("chunks/ab/abcd.tmp-0123").expect("exists"));
+        assert!(
+            !backend
+                .exists("snapshots/dead.snap.tmp-4567")
+                .expect("exists")
+        );
+        assert_eq!(repo.list_snapshot_ids().expect("ids"), vec![m.id]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

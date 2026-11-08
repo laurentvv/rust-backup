@@ -110,8 +110,8 @@ impl BackupRunner {
 
     fn run(&self, job: &JobConfig, passphrase: &str) -> Result<(Uuid, BackupStats), String> {
         let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
-        let repo = rb_core::repo::Repository::open(backend, passphrase)
-            .map_err(|e| format!("ouverture du dépôt impossible : {e}"))?;
+        let repo =
+            rb_core::repo::Repository::open(backend, passphrase).map_err(|e| e.to_string())?;
         let tx = self.tx.clone();
         let (manifest, stats) = run_backup(
             &repo,
@@ -189,8 +189,8 @@ pub fn spawn_snapshots(
     std::thread::spawn(move || {
         let result = (|| {
             let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
-            let repo = rb_core::repo::Repository::open(backend, &passphrase)
-                .map_err(|e| format!("ouverture du dépôt impossible : {e}"))?;
+            let repo =
+                rb_core::repo::Repository::open(backend, &passphrase).map_err(|e| e.to_string())?;
             let mut rows = Vec::new();
             for manifest in repo
                 .all_manifests()
@@ -242,8 +242,8 @@ pub fn spawn_restore(
     std::thread::spawn(move || {
         let result = (|| {
             let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
-            let repo = rb_core::repo::Repository::open(backend, &passphrase)
-                .map_err(|e| format!("ouverture du dépôt impossible : {e}"))?;
+            let repo =
+                rb_core::repo::Repository::open(backend, &passphrase).map_err(|e| e.to_string())?;
             rb_core::restore::restore(
                 &repo,
                 &snapshot_id,
@@ -267,19 +267,19 @@ pub fn spawn_restore(
     rx
 }
 
-/// Runs a verification pass on a background thread; reports a summary line
+/// Runs a verification pass on a background thread; reports the structured report
 /// or an error message.
 pub fn spawn_verify(
     job: JobConfig,
     passphrase: String,
     full: bool,
-) -> Receiver<Result<String, String>> {
+) -> Receiver<Result<rb_core::verify::VerifyReport, String>> {
     let (tx, rx) = flume::bounded(1);
     std::thread::spawn(move || {
         let result = (|| {
             let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
-            let repo = rb_core::repo::Repository::open(backend, &passphrase)
-                .map_err(|e| format!("ouverture du dépôt impossible : {e}"))?;
+            let repo =
+                rb_core::repo::Repository::open(backend, &passphrase).map_err(|e| e.to_string())?;
             let mode = if full {
                 rb_core::verify::VerifyMode::Full
             } else {
@@ -293,20 +293,7 @@ pub fn spawn_verify(
             {
                 let _ = catalog.insert_verify_result(&repo.describe(), &report);
             }
-            let head = format!(
-                "{} [{}] — {} instantané(s), {} bloc(s), {} orphelin(s)",
-                if report.ok() { "OK" } else { "FAILED" },
-                report.mode.as_str(),
-                report.manifests_checked,
-                report.chunks_checked,
-                report.orphan_chunks
-            );
-            let issues: Vec<String> = report.issues.iter().map(|i| i.message.clone()).collect();
-            if issues.is_empty() {
-                Ok(head)
-            } else {
-                Ok(format!("{head}\n{}", issues.join("\n")))
-            }
+            Ok(report)
         })();
         let _ = tx.send(result);
     });

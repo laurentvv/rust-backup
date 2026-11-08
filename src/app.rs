@@ -13,7 +13,7 @@ use gpui_kit::component::sidebar::{
     Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
 };
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme, Icon, Theme, ThemeMode, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, TitleBar, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -21,8 +21,9 @@ use rb_core::backup::BackupEvent;
 use rb_core::catalog::Catalog;
 use rb_core::domain::{Destination, JobConfig, JobId, RunRecord, RunStatus};
 
-use crate::i18n::{self, Lang, human_bytes};
+use crate::i18n::{self, Lang, human_bytes_lang};
 use crate::runner::{self, EngineEvent};
+use crate::theme;
 
 /// Active navigation section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,8 @@ pub enum RunPhase {
         /// User-facing error.
         error: String,
     },
+    /// Run was cancelled by the user.
+    Cancelled,
 }
 
 /// The root application view.
@@ -94,6 +97,7 @@ pub struct RustBackupApp {
     // --- restore browser state ---
     snapshots: Vec<runner::SnapshotRow>,
     selected_snapshot: Option<Uuid>,
+    selected_restore_job: Option<JobId>,
     restore_search: gpui::Entity<InputState>,
     restore_target: gpui::Entity<InputState>,
     selected_paths: std::collections::BTreeSet<String>,
@@ -103,6 +107,10 @@ pub struct RustBackupApp {
     restore_result: Option<(bool, String)>,
     dark: bool,
     run_est_files: u64,
+
+    // --- cached statistics for fast render ---
+    cached_snapshot_count: usize,
+    cached_protected_volume: u64,
 }
 
 impl RustBackupApp {
@@ -119,7 +127,11 @@ impl RustBackupApp {
                 .new(|cx| InputState::new(window, cx).placeholder(r"C:\Users\moi\Documents")),
             form_dest: cx
                 .new(|cx| InputState::new(window, cx).placeholder(r"E:\Sauvegardes\depot")),
-            form_passphrase: cx.new(|cx| InputState::new(window, cx).placeholder("••••••••••")),
+            form_passphrase: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("••••••••••")
+                    .masked(true)
+            }),
             phase: RunPhase::Idle,
             run_files_done: 0,
             run_bytes_done: 0,
@@ -131,6 +143,7 @@ impl RustBackupApp {
             toast: None,
             snapshots: Vec::new(),
             selected_snapshot: None,
+            selected_restore_job: None,
             restore_search: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(crate::i18n::Lang::default().texts().search_files)
@@ -144,9 +157,11 @@ impl RustBackupApp {
             restore_result: None,
             dark: false,
             run_est_files: 0,
+            cached_snapshot_count: 0,
+            cached_protected_volume: 0,
         };
         // Palette applied once at startup; runtime switching happens in
-        // Settings via Theme::change (dark stays the stock dark theme).
+        // Settings via theme::apply_brand_theme.
         app.refresh_catalog();
         app
     }
@@ -159,7 +174,7 @@ impl RustBackupApp {
         Catalog::default_path().ok()
     }
 
-    /// Reloads jobs and recent runs from the local catalog.
+    /// Reloads jobs, recent runs and aggregate stats from the local catalog.
     fn refresh_catalog(&mut self) {
         let Some(path) = self.catalog_path() else {
             return;
@@ -172,30 +187,35 @@ impl RustBackupApp {
         };
         self.jobs = jobs;
 
+        if self.selected_restore_job.is_none()
+            || !self
+                .jobs
+                .iter()
+                .any(|j| Some(j.id) == self.selected_restore_job)
+        {
+            self.selected_restore_job = self.jobs.first().map(|j| j.id);
+        }
+
         let mut runs: Vec<(String, RunRecord)> = Vec::new();
+        let mut total_snapshots = 0;
+        let mut protected_vol = 0;
         for job in &self.jobs {
             if let Ok(job_runs) = catalog.list_runs(job.id) {
                 for record in job_runs.into_iter().take(10) {
                     runs.push((job.name.clone(), record));
                 }
             }
+            if let Ok(snapshots) = catalog.list_snapshots(job.id) {
+                total_snapshots += snapshots.len();
+                if let Some(first) = snapshots.first() {
+                    protected_vol += first.bytes_total;
+                }
+            }
         }
         runs.sort_by_key(|(_, run)| std::cmp::Reverse(run.started_at));
         self.recent_runs = runs.into_iter().take(30).collect();
-    }
-
-    fn snapshot_count(&self) -> usize {
-        let Some(path) = self.catalog_path() else {
-            return 0;
-        };
-        let Ok(catalog) = Catalog::open(&path) else {
-            return 0;
-        };
-        self.jobs
-            .iter()
-            .filter_map(|job| catalog.list_snapshots(job.id).ok())
-            .map(|snapshots| snapshots.len())
-            .sum()
+        self.cached_snapshot_count = total_snapshots;
+        self.cached_protected_volume = protected_vol;
     }
 
     fn start_backup(
@@ -289,6 +309,7 @@ impl RustBackupApp {
                 };
             }
             EngineEvent::Finished(Ok(summary)) => {
+                self.cancel = None;
                 let _snapshot = summary.snapshot_id.simple().to_string();
                 self.run_files_done = summary.stats.files_total;
                 self.run_bytes_done = summary.stats.bytes_total;
@@ -297,13 +318,18 @@ impl RustBackupApp {
                 self.refresh_catalog();
             }
             EngineEvent::Finished(Err(message)) => {
-                self.phase = RunPhase::Failed {
-                    error: message.clone(),
-                };
-                self.toast = Some((true, message));
+                self.cancel = None;
+                if message.to_lowercase().contains("cancel") {
+                    self.phase = RunPhase::Cancelled;
+                    self.toast = Some((false, self.texts().cancelled.to_string()));
+                } else {
+                    self.phase = RunPhase::Failed {
+                        error: message.clone(),
+                    };
+                    self.toast = Some((true, message));
+                }
             }
         }
-        self.cancel = None;
         cx.notify();
     }
 
@@ -317,7 +343,11 @@ impl RustBackupApp {
 
     fn load_snapshots(&mut self, cx: &mut gpui::Context<Self>) {
         let t = self.texts();
-        let Some(job) = self.jobs.first().cloned() else {
+        let job = self
+            .selected_restore_job
+            .and_then(|id| self.jobs.iter().find(|j| j.id == id).cloned())
+            .or_else(|| self.jobs.first().cloned());
+        let Some(job) = job else {
             return;
         };
         let passphrase = self.passphrase_or_form(cx);
@@ -354,7 +384,11 @@ impl RustBackupApp {
         if self.restore_busy {
             return;
         }
-        let Some(job) = self.jobs.first().cloned() else {
+        let job = self
+            .selected_restore_job
+            .and_then(|id| self.jobs.iter().find(|j| j.id == id).cloned())
+            .or_else(|| self.jobs.first().cloned());
+        let Some(job) = job else {
             return;
         };
         let passphrase = self.passphrase_or_form(cx);
@@ -424,11 +458,14 @@ impl RustBackupApp {
                         app.restore_result = Some((
                             false,
                             format!(
-                                "{} ✓ {} fichiers, {} ignorés, {} répertoires",
+                                "{} ✓ {} {}, {} {}, {} {}",
                                 app.texts().restored,
                                 stats.files_restored,
+                                app.texts().files,
                                 stats.files_skipped,
-                                stats.dirs_created
+                                app.texts().skipped,
+                                stats.dirs_created,
+                                app.texts().directories
                             ),
                         ));
                     }
@@ -471,9 +508,44 @@ impl RustBackupApp {
             if let Ok(result) = rx.recv_async().await {
                 let _ = this.update(cx, |app, cx| {
                     match result {
-                        Ok(summary) => app.toast = Some((false, summary)),
+                        Ok(report) => {
+                            if report.ok() {
+                                let msg = match app.lang {
+                                    Lang::Fr => format!(
+                                        "Intégrité OK : {} instantanés, {} fragments vérifiés",
+                                        report.manifests_checked, report.chunks_checked
+                                    ),
+                                    Lang::En => format!(
+                                        "Integrity OK: {} snapshots, {} chunks verified",
+                                        report.manifests_checked, report.chunks_checked
+                                    ),
+                                };
+                                app.toast = Some((false, msg));
+                            } else {
+                                let issues_msg = report
+                                    .issues
+                                    .iter()
+                                    .map(|i| i.message.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                let msg = match app.lang {
+                                    Lang::Fr => format!(
+                                        "{} problème(s) détecté(s) : {}",
+                                        report.issues.len(),
+                                        issues_msg
+                                    ),
+                                    Lang::En => format!(
+                                        "{} issue(s) detected: {}",
+                                        report.issues.len(),
+                                        issues_msg
+                                    ),
+                                };
+                                app.toast = Some((true, msg));
+                            }
+                        }
                         Err(message) => app.toast = Some((true, message)),
                     }
+                    app.auto_dismiss_toast(cx);
                     cx.notify();
                 });
             }
@@ -666,7 +738,7 @@ impl RustBackupApp {
                             .justify_end()
                             .text_size(px(11.0))
                             .text_color(cx.theme().muted_foreground)
-                            .child(human_bytes(run.bytes_total)),
+                            .child(human_bytes_lang(run.bytes_total, self.lang)),
                     ),
             );
         }
@@ -732,12 +804,15 @@ impl RustBackupApp {
                 RunStatus::Failed => t.failed.to_string(),
             })
             .unwrap_or_else(|| t.idle.to_string());
-        let protected: u64 = self
-            .recent_runs
-            .first()
-            .filter(|(_, run)| run.status == RunStatus::Success)
-            .map(|(_, run)| run.bytes_total)
-            .unwrap_or(0);
+        let protected: u64 = if self.cached_protected_volume > 0 {
+            self.cached_protected_volume
+        } else {
+            self.recent_runs
+                .first()
+                .filter(|(_, run)| run.status == RunStatus::Success)
+                .map(|(_, run)| run.bytes_total)
+                .unwrap_or(0)
+        };
 
         v_flex()
             .gap_4()
@@ -766,7 +841,7 @@ impl RustBackupApp {
                     ))
                     .child(self.stat_card(
                         t.snapshots_count,
-                        &self.snapshot_count().to_string(),
+                        &self.cached_snapshot_count.to_string(),
                         IconName::Layers,
                         cx.theme().success,
                         cx,
@@ -780,7 +855,7 @@ impl RustBackupApp {
                     ))
                     .child(self.stat_card(
                         t.protected_volume,
-                        &human_bytes(protected),
+                        &human_bytes_lang(protected, self.lang),
                         IconName::ShieldCheck,
                         cx.theme().danger,
                         cx,
@@ -981,6 +1056,10 @@ impl RustBackupApp {
                 t.run.to_string(),
                 Some((cx.theme().danger, format!("{} — {error}", t.backup_failed))),
             ),
+            RunPhase::Cancelled => (
+                t.run.to_string(),
+                Some((cx.theme().warning, t.cancelled_by_user.to_string())),
+            ),
         };
 
         let running = matches!(self.phase, RunPhase::Running { .. });
@@ -1091,7 +1170,7 @@ impl RustBackupApp {
                     ))
                     .child(self.stat_card(
                         t.bytes_processed,
-                        &human_bytes(self.run_bytes_done),
+                        &human_bytes_lang(self.run_bytes_done, self.lang),
                         IconName::HardDrive,
                         cx.theme().warning,
                         cx,
@@ -1157,7 +1236,7 @@ impl RustBackupApp {
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .child(format!("{} fichiers", row.files)),
+                            .child(format!("{} {}", row.files, t.files)),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1220,7 +1299,7 @@ impl RustBackupApp {
                         div()
                             .text_size(px(12.0))
                             .text_color(cx.theme().muted_foreground)
-                            .child(crate::i18n::human_bytes(size)),
+                            .child(human_bytes_lang(size, self.lang)),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1258,14 +1337,49 @@ impl RustBackupApp {
                 .iter()
                 .all(|(_, rel, _)| self.selected_paths.contains(rel.as_str()));
 
+        let job_selector = if self.jobs.len() > 1 {
+            let mut tabs = h_flex().gap_2().items_center().flex_wrap();
+            tabs = tabs.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("{}:", t.select_job)),
+            );
+            for job in &self.jobs {
+                let is_current = Some(job.id) == self.selected_restore_job;
+                let jid = job.id;
+                let jname = job.name.clone();
+                tabs = tabs.child(
+                    Button::new(gpui::SharedString::new(format!(
+                        "restore-job-{}",
+                        job.id.simple()
+                    )))
+                    .label(jname)
+                    .when(is_current, |b| b.primary())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected_restore_job = Some(jid);
+                        this.snapshots.clear();
+                        this.selected_snapshot = None;
+                        this.selected_paths.clear();
+                        this.load_snapshots(cx);
+                        cx.notify();
+                    })),
+                );
+            }
+            Some(tabs)
+        } else {
+            None
+        };
+
         v_flex()
             .gap_4()
             .child(self.section_header(IconName::Archive, t.restore, cx))
+            .when_some(job_selector, |this, js| this.child(js))
             .when_some(banner, |this, b| this.child(b))
             .child(
                 Button::new("reload-snapshots")
-                    .label(format!("{} (actualiser)", t.snapshots))
-                    .icon(IconName::RefreshCw)
+                    .label(format!("{} ({})", t.snapshots, t.refresh))
+                    .icon(IconName::RefreshCcw)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.load_snapshots(cx);
                     })),
@@ -1299,7 +1413,11 @@ impl RustBackupApp {
                                 .child(
                                     Button::new("select-all")
                                         .ghost()
-                                        .label(if all_selected { "∅" } else { t.select_all })
+                                        .label(if all_selected {
+                                            t.deselect_all
+                                        } else {
+                                            t.select_all
+                                        })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             let files: Vec<String> = this
                                                 .snapshots
@@ -1544,13 +1662,13 @@ impl RustBackupApp {
                             .child(
                                 div()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(Icon::new(IconName::Eye).size_4()),
+                                    .child(Icon::new(IconName::Sparkles).size_4()),
                             )
                             .child(
                                 div()
                                     .text_size(px(14.0))
                                     .text_color(cx.theme().foreground)
-                                    .child("Thème / Theme"),
+                                    .child(t.theme),
                             ),
                     )
                     .child(
@@ -1558,21 +1676,21 @@ impl RustBackupApp {
                             .gap_2()
                             .child(
                                 Button::new("theme-dark")
-                                    .label("Sombre / Dark")
+                                    .label(t.theme_dark)
                                     .when(self.dark, |b| b.primary())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.dark = true;
-                                        Theme::change(ThemeMode::Dark, None, cx);
+                                        theme::apply_brand_theme(true, cx);
                                         cx.notify();
                                     })),
                             )
                             .child(
                                 Button::new("theme-light")
-                                    .label("Clair / Light")
+                                    .label(t.theme_light)
                                     .when(!self.dark, |b| b.primary())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.dark = false;
-                                        Theme::change(ThemeMode::Light, None, cx);
+                                        theme::apply_brand_theme(false, cx);
                                         cx.notify();
                                     })),
                             ),
@@ -1592,7 +1710,7 @@ impl RustBackupApp {
                             .text_color(cx.theme().foreground)
                             .child(t.passphrase),
                     )
-                    .child(Input::new(&self.form_passphrase))
+                    .child(Input::new(&self.form_passphrase).mask_toggle())
                     .child(
                         div()
                             .text_size(px(12.0))
@@ -1648,20 +1766,24 @@ impl gpui::Render for RustBackupApp {
                 }))
         };
 
+        let (lock_icon, lock_label, lock_color) =
+            if self.passphrase.is_empty() && self.form_passphrase.read(cx).value().is_empty() {
+                (IconName::LockOpen, t.passphrase_unset, cx.theme().warning)
+            } else {
+                (IconName::Lock, t.passphrase_set, cx.theme().success)
+            };
+
         let sidebar = Sidebar::new("main-sidebar")
             .header(
                 SidebarHeader::new().child(
                     h_flex()
                         .gap_2()
-                        .child(
-                            svg()
-                                .path("icons/brand-mark.svg")
-                                .size_6()
-                                .text_color(gpui::rgb(0x0B8F80)),
-                        )
+                        .items_center()
+                        .child(img("icons/brand-mark.png").size(px(24.0)))
                         .child(
                             div()
                                 .text_size(px(16.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(cx.theme().foreground)
                                 .child("RustBackup"),
                         ),
@@ -1710,10 +1832,23 @@ impl gpui::Render for RustBackupApp {
             )
             .footer(
                 SidebarFooter::new().child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(cx.theme().muted_foreground)
-                        .child("AES-256-GCM · Argon2id · zstd"),
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .text_size(px(11.0))
+                                .text_color(lock_color)
+                                .child(Icon::new(lock_icon).size_3())
+                                .child(lock_label),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("AES-256-GCM · Argon2id · zstd"),
+                        ),
                 ),
             );
 
@@ -1754,17 +1889,20 @@ impl gpui::Render for RustBackupApp {
                 TitleBar::new().child(
                     h_flex()
                         .gap_2()
+                        .items_center()
+                        .child(img("icons/brand-mark.png").size(px(16.0)))
                         .child(
                             div()
                                 .text_size(px(13.0))
-                                .text_color(cx.theme().muted_foreground)
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
                                 .child("RustBackup"),
                         )
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(t.tagline),
+                                .child(format!("— {}", t.tagline)),
                         ),
                 ),
             )

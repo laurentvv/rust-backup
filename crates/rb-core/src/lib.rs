@@ -24,6 +24,7 @@ pub mod domain;
 pub mod error;
 pub mod hash;
 pub mod manifest;
+mod process;
 pub mod repo;
 pub mod restore;
 pub mod verify;

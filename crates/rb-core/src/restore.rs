@@ -109,6 +109,9 @@ pub fn restore(
     options: &RestoreOptions,
     mut on_event: impl FnMut(RestoreEvent) -> crate::Result<()>,
 ) -> crate::Result<RestoreStats> {
+    // Shared lock: a concurrent prune or snapshot deletion must not remove
+    // chunks this restore is about to read.
+    let _lock = repo.acquire_shared_lock("restore")?;
     let manifest = repo.read_manifest(snapshot_id)?;
     let plan = build_plan(&manifest, selection, destination)?;
 

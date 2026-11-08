@@ -61,7 +61,7 @@ pub struct PruneReport {
     pub temp_files_removed: u64,
 }
 
-/// Exclusive lock information stored under `locks/<id>.json`.
+/// Lock information stored under `locks/<id>.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockInfo {
     /// Unique identifier for this lock acquisition.
@@ -72,11 +72,31 @@ pub struct LockInfo {
     pub pid: u32,
     /// When the lock was acquired (UTC).
     pub created_at: DateTime<Utc>,
-    /// High-level operation ("backup", "prune", "delete_snapshot").
+    /// High-level operation ("backup", "prune", "restore", "verify", ...).
     pub operation: String,
+    /// Exclusive (writers) or shared (readers). Lock files written before
+    /// this field existed are exclusive.
+    #[serde(default = "default_exclusive")]
+    pub exclusive: bool,
 }
 
-/// An exclusive repository lock handle. When dropped, the lock file on the
+fn default_exclusive() -> bool {
+    true
+}
+
+/// A lock is stale when older than 24 hours, or when it was written on this
+/// machine by a process that no longer runs (or whose PID was reused).
+fn lock_is_stale(info: &LockInfo) -> bool {
+    if Utc::now().signed_duration_since(info.created_at) >= chrono::Duration::hours(24) {
+        return true;
+    }
+    info.hostname
+        .eq_ignore_ascii_case(&crate::process::current_hostname())
+        && crate::process::process_state(info.pid, info.created_at)
+            == crate::process::ProcessState::Dead
+}
+
+/// A repository lock handle (shared or exclusive). When dropped, the lock file on the
 /// backend is removed automatically.
 pub struct RepositoryLock {
     backend: std::sync::Arc<dyn StorageBackend>,
@@ -436,54 +456,118 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::RepositoryLocked`](crate::Error::RepositoryLocked) if an
-    /// active lock is held by another process or operation. Stale locks (> 24
-    /// hours) are broken automatically.
+    /// Returns [`Error::RepositoryLocked`](crate::Error::RepositoryLocked) if
+    /// any live lock (shared or exclusive) is held. Stale locks are broken
+    /// automatically: older than 24 hours, or written on THIS machine by a
+    /// process that no longer runs (crash, power loss, USB unplug).
     pub fn acquire_lock(&self, operation: &str) -> crate::Result<RepositoryLock> {
-        let _ = self.backend.mkdirs("locks");
-        let existing = self.backend.list("locks")?;
-        let now = Utc::now();
-        let stale_threshold = chrono::Duration::hours(24);
+        self.acquire(operation, true)
+    }
 
-        for rel in existing {
-            if !rel.ends_with(".json") {
-                continue;
-            }
-            if let Ok(data) = self.backend.read(&rel)
-                && let Ok(info) = serde_json::from_slice::<LockInfo>(&data)
-            {
-                let age = now.signed_duration_since(info.created_at);
-                if age < stale_threshold {
-                    return Err(crate::Error::RepositoryLocked(format!(
-                        "operation '{}' by PID {} on host '{}' since {}",
-                        info.operation, info.pid, info.hostname, info.created_at
-                    )));
-                }
-                // Stale lock: break it.
-                let _ = self.backend.remove(&rel);
-            }
-        }
+    /// Acquires a shared lock for a read-only operation (restore, verify):
+    /// shared locks coexist, but block exclusive ones (prune, snapshot
+    /// deletion, backup) so data cannot vanish mid-read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RepositoryLocked`](crate::Error::RepositoryLocked) if
+    /// a live exclusive lock is held.
+    pub fn acquire_shared_lock(&self, operation: &str) -> crate::Result<RepositoryLock> {
+        self.acquire(operation, false)
+    }
+
+    /// Two-phase acquisition, safe on any backend without an atomic
+    /// create-if-absent primitive: check, write our lock, then re-check. If
+    /// the re-check sees a conflicting live lock (a concurrent writer), our
+    /// lock is withdrawn and the call fails — two processes can both fail in
+    /// a tight race, but never both succeed.
+    fn acquire(&self, operation: &str, exclusive: bool) -> crate::Result<RepositoryLock> {
+        let _ = self.backend.mkdirs("locks");
+        self.check_lock_conflicts(exclusive, None)?;
 
         let lock_id = Uuid::new_v4();
-        let hostname = std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "localhost".to_string());
         let info = LockInfo {
             id: lock_id,
-            hostname,
+            hostname: crate::process::current_hostname(),
             pid: std::process::id(),
-            created_at: now,
+            created_at: Utc::now(),
             operation: operation.to_string(),
+            exclusive,
         };
         let rel = format!("locks/{}.json", lock_id.simple());
         let json = serde_json::to_string_pretty(&info)?;
         self.backend.write_atomic(&rel, json.as_bytes())?;
-
-        Ok(RepositoryLock {
+        let handle = RepositoryLock {
             backend: std::sync::Arc::clone(&self.backend),
             lock_id,
             released: false,
-        })
+        };
+
+        // Phase 2: dropping `handle` on error removes our lock file.
+        self.check_lock_conflicts(exclusive, Some(lock_id))?;
+        Ok(handle)
+    }
+
+    /// Fails on the first live lock that conflicts with the requested mode;
+    /// removes stale ones on the way. `own` is skipped (phase 2).
+    fn check_lock_conflicts(&self, exclusive: bool, own: Option<Uuid>) -> crate::Result<()> {
+        for rel in self.backend.list("locks")? {
+            if !rel.ends_with(".json") {
+                continue;
+            }
+            let Ok(data) = self.backend.read(&rel) else {
+                continue; // released between list and read
+            };
+            let Ok(info) = serde_json::from_slice::<LockInfo>(&data) else {
+                continue; // not ours to judge; `break_locks` can clear it
+            };
+            if Some(info.id) == own || !(exclusive || info.exclusive) {
+                continue;
+            }
+            if lock_is_stale(&info) {
+                let _ = self.backend.remove(&rel);
+                continue;
+            }
+            return Err(crate::Error::RepositoryLocked(format!(
+                "operation '{}' by PID {} on host '{}' since {} — if no such operation is \
+                 running anymore, unlock the repository",
+                info.operation, info.pid, info.hostname, info.created_at
+            )));
+        }
+        Ok(())
+    }
+
+    /// Lists the lock files currently present (unparseable ones are skipped).
+    ///
+    /// # Errors
+    ///
+    /// Returns I/O errors from the backend.
+    pub fn list_locks(&self) -> crate::Result<Vec<LockInfo>> {
+        let mut out = Vec::new();
+        for rel in self.backend.list("locks")? {
+            if rel.ends_with(".json")
+                && let Ok(data) = self.backend.read(&rel)
+                && let Ok(info) = serde_json::from_slice::<LockInfo>(&data)
+            {
+                out.push(info);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Forcibly removes EVERY lock file (including unparseable ones) and
+    /// returns the parseable ones removed. Only call this after the user
+    /// confirmed that no other operation runs on this repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns I/O errors from the backend.
+    pub fn break_locks(&self) -> crate::Result<Vec<LockInfo>> {
+        let removed = self.list_locks()?;
+        for rel in self.backend.list("locks")? {
+            self.backend.remove(&rel)?;
+        }
+        Ok(removed)
     }
 
     /// Deletes a snapshot manifest from the repository.
@@ -722,6 +806,160 @@ mod tests {
             .acquire_lock("third_op")
             .expect("acquire lock 2 after drop");
         drop(lock2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Plants a lock file as another process would have written it.
+    fn plant_lock(repo: &Repository, hostname: &str, pid: u32, exclusive: bool) -> Uuid {
+        let info = LockInfo {
+            id: Uuid::new_v4(),
+            hostname: hostname.to_string(),
+            pid,
+            created_at: Utc::now(),
+            operation: "planted".to_string(),
+            exclusive,
+        };
+        repo.backend.mkdirs("locks").expect("locks dir");
+        repo.backend
+            .write_atomic(
+                &format!("locks/{}.json", info.id.simple()),
+                serde_json::to_string(&info).expect("json").as_bytes(),
+            )
+            .expect("plant");
+        info.id
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dead_pid_lock_on_same_host_is_broken_automatically() {
+        let (dir, repo) = temp_repo();
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("spawn");
+        let dead_pid = child.id();
+        child.wait().expect("wait");
+        drop(child);
+        plant_lock(&repo, &crate::process::current_hostname(), dead_pid, true);
+
+        let lock = repo
+            .acquire_lock("backup")
+            .expect("crashed run's lock must not block");
+        assert_eq!(repo.list_locks().expect("locks").len(), 1, "only ours");
+        drop(lock);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_lock_from_other_host_is_reported_and_kept() {
+        let (dir, repo) = temp_repo();
+        plant_lock(&repo, "other-host", 4242, true);
+
+        let err = repo.acquire_lock("backup").err().expect("must be refused");
+        assert!(
+            err.to_string().contains("other-host"),
+            "names the owner: {err}"
+        );
+        assert_eq!(
+            repo.list_locks().expect("locks").len(),
+            1,
+            "foreign lock kept"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_lock_without_mode_field_is_exclusive() {
+        let (dir, repo) = temp_repo();
+        repo.backend.mkdirs("locks").expect("locks dir");
+        let legacy = format!(
+            r#"{{"id":"{}","hostname":"other-host","pid":1,"created_at":"{}","operation":"backup"}}"#,
+            Uuid::new_v4(),
+            Utc::now().to_rfc3339()
+        );
+        repo.backend
+            .write_atomic("locks/legacy.json", legacy.as_bytes())
+            .expect("plant");
+        assert!(
+            repo.acquire_shared_lock("verify").is_err(),
+            "old lock files block readers too"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn shared_locks_coexist_and_block_exclusive_ones() {
+        let (dir, repo) = temp_repo();
+        let verify = repo.acquire_shared_lock("verify").expect("shared 1");
+        let restore = repo.acquire_shared_lock("restore").expect("shared 2");
+        assert!(
+            repo.acquire_lock("prune").is_err(),
+            "prune must wait for readers"
+        );
+        drop(verify);
+        drop(restore);
+        let prune = repo.acquire_lock("prune").expect("exclusive after readers");
+        assert!(
+            repo.acquire_shared_lock("verify").is_err(),
+            "readers wait for the writer"
+        );
+        drop(prune);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn concurrent_acquisitions_never_grant_two_exclusive_locks() {
+        let (dir, repo) = temp_repo();
+        let repo = std::sync::Arc::new(repo);
+        let holders = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (repo, holders, max_seen, barrier) = (
+                    std::sync::Arc::clone(&repo),
+                    std::sync::Arc::clone(&holders),
+                    std::sync::Arc::clone(&max_seen),
+                    std::sync::Arc::clone(&barrier),
+                );
+                std::thread::spawn(move || {
+                    use std::sync::atomic::Ordering::SeqCst;
+                    barrier.wait();
+                    for _ in 0..20 {
+                        if let Ok(lock) = repo.acquire_lock("race") {
+                            let now = holders.fetch_add(1, SeqCst) + 1;
+                            max_seen.fetch_max(now, SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                            holders.fetch_sub(1, SeqCst);
+                            drop(lock);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("thread");
+        }
+        assert!(
+            max_seen.load(std::sync::atomic::Ordering::SeqCst) <= 1,
+            "two exclusive holders at once"
+        );
+        assert!(repo.list_locks().expect("locks").is_empty(), "all released");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn break_locks_removes_every_lock_file() {
+        let (dir, repo) = temp_repo();
+        plant_lock(&repo, "other-host", 1, true);
+        plant_lock(&repo, "other-host", 2, false);
+        repo.backend
+            .write_atomic("locks/garbage.json", b"not json")
+            .expect("plant garbage");
+        let removed = repo.break_locks().expect("break");
+        assert_eq!(removed.len(), 2);
+        assert!(repo.backend.list("locks").expect("list").is_empty());
+        repo.acquire_lock("backup").expect("free again");
         std::fs::remove_dir_all(&dir).ok();
     }
 

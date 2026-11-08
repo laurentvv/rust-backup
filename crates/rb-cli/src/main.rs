@@ -133,6 +133,15 @@ enum RepoAction {
         #[arg(long)]
         sftp_root: Option<String>,
     },
+    /// Remove stale locks left by a crashed run (asks for confirmation).
+    Unlock {
+        /// Job name or id whose repository to unlock.
+        #[arg(long)]
+        job: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -300,6 +309,41 @@ fn main() -> anyhow::Result<()> {
                     repo.describe(),
                     repo.key_id()
                 );
+            }
+            RepoAction::Unlock { job, yes } => {
+                let catalog = Catalog::open(&db_path)?;
+                let config = find_job(&catalog, &job)?;
+                let passphrase = read_passphrase()?;
+                let repo = open_repo(&config, &passphrase, cli.insecure_accept_any_host_key)?;
+                let locks = repo.list_locks().map_err(|e| anyhow::anyhow!(e))?;
+                if locks.is_empty() {
+                    println!("no lock on {}", repo.describe());
+                    return Ok(());
+                }
+                for lock in &locks {
+                    println!(
+                        "lock: '{}' by PID {} on host '{}' since {} ({})",
+                        lock.operation,
+                        lock.pid,
+                        lock.hostname,
+                        lock.created_at,
+                        if lock.exclusive {
+                            "exclusive"
+                        } else {
+                            "shared"
+                        }
+                    );
+                }
+                if !yes
+                    && !confirm(
+                        "Remove these locks? Only do this if no operation runs on this repository. [y/N] ",
+                    )?
+                {
+                    println!("aborted, nothing removed");
+                    return Ok(());
+                }
+                let removed = repo.break_locks().map_err(|e| anyhow::anyhow!(e))?;
+                println!("{} lock(s) removed", removed.len());
             }
         },
         Command::Backup { job, full } => {
@@ -489,6 +533,19 @@ fn find_job(catalog: &Catalog, name_or_id: &str) -> anyhow::Result<JobConfig> {
 
 /// Reads the repository passphrase from the environment (never an
 /// argument, never printed).
+/// Asks a yes/no question on stdin; anything but "y"/"yes" is a no.
+fn confirm(question: &str) -> anyhow::Result<bool> {
+    use std::io::Write as _;
+    print!("{question}");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 fn read_passphrase() -> anyhow::Result<String> {
     std::env::var("RBACKUP_PASSPHRASE")
         .map_err(|_| anyhow::anyhow!("set RBACKUP_PASSPHRASE to the repository passphrase"))

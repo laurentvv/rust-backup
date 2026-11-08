@@ -111,6 +111,9 @@ pub fn verify(
         issues: Vec::new(),
     };
 
+    // Shared lock: concurrent prune would make live chunks look missing.
+    let _lock = repo.acquire_shared_lock("verify")?;
+
     // 1. Load and authenticate every manifest, collecting references.
     let mut referenced: BTreeMap<String, u64> = BTreeMap::new();
     let snapshots = repo.list_snapshot_ids()?;

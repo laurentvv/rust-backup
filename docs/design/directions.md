@@ -1,7 +1,7 @@
 # Brand directions (J3.2) — decision gate
 
-> Status: **direction chosen 2026-11-08 — hybrid Strata + Ferrite**; product name still pending
-> (see "Decision record" at the end). J3.3 starts from the hybrid definition below.
+> Status: **decided 2026-11-08 — hybrid Strata + Ferrite, product name unchanged (RustBackup / rust-backup)**
+> (see "Decision record" at the end). J3.3 starts from the hybrid definition below; J3.5 (rename) is dropped.
 > Nothing downstream (J3.3 design system, J3.4 illustrations, J3.5 rename) starts before that choice.
 > Inputs: `docs/design/research/README.md` (J3.1). Visual comparison: `docs/design/directions/comparison.html`
 > (also published as a private Artifact). Logo sketches: `docs/design/directions/*-mark.svg`.
@@ -151,7 +151,8 @@ yet — that check is part of J3.5 before any rename.
 
 | Date | Decision | By |
 |---|---|---|
-| 2026-11-08 | Direction: **hybrid Strata + Ferrite** · name: *pending* | owner |
+| 2026-11-08 | Direction: **hybrid Strata + Ferrite** | owner |
+| 2026-11-08 | Name: **keep the original name** — RustBackup (display) / `rust-backup` (repository). No rename, no data-folder migration, no trademark check; lot J3.5 is dropped. "Ferrite" and "Strata" remain internal names of the design directions only. | owner |
 
 ### Chosen hybrid — working definition for J3.3
 
@@ -170,8 +171,7 @@ The split follows the Fluent two-layer model (research §1): Strata owns the **b
 | Hero | Strata structure, Ferrite tone | Hero card with status sentence + 2 actions + illustration; Big Shoulders Display is **dropped** to stay native (open question for J3.3: keep it for the wordmark only) |
 | Neutrals | Ferrite, warmed toward Mica | Dark: graphite family (`#0F1012`…`#2A2D32`) as Mica fallback/content; light: concrete `#E9E8E4` fallback, `#F6F5F2` content |
 | Illustrations | Mixed, to settle in J3.4 | Isometric objects (Ferrite) with the sediment ramp as secondary colors (Strata) |
-| Mark | To redraw in J3.3 | Candidate: the Strata core sample recolored with oxide/magnetite layers, or the Ferrite toroid; depends on the name |
+| Mark | To redraw in J3.3 | New RustBackup mark replacing the current shield. Rust *is* iron oxide, so the oxide palette now ties directly to the name. Candidates: the Strata core sample with oxide/magnetite layers, or the Ferrite toroid |
 | Semantics | Strata (Fluent status) | Success/caution/critical tokens distinct from oxide; check that warning amber stays distinguishable from the oxide accent |
 
-Open items before J3.3 ends: product name (and trademark check in J3.5), final mark, whether the condensed display
-face survives anywhere.
+Open items before J3.3 ends: final mark, whether the condensed display face survives anywhere (e.g. the wordmark).

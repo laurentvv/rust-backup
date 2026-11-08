@@ -102,7 +102,6 @@ pub struct RustBackupApp {
     lang: Lang,
     jobs: Vec<JobConfig>,
     recent_runs: Vec<(String, RunRecord)>,
-    passphrase: String,
 
     form_name: gpui::Entity<InputState>,
     form_source: gpui::Entity<InputState>,
@@ -257,7 +256,6 @@ impl RustBackupApp {
             lang: Lang::default(),
             jobs: Vec::new(),
             recent_runs: Vec::new(),
-            passphrase: String::new(),
             form_name: cx.new(|cx| InputState::new(window, cx).placeholder("documents")),
             form_source: cx
                 .new(|cx| InputState::new(window, cx).placeholder(r"C:\Users\moi\Documents")),
@@ -407,11 +405,7 @@ impl RustBackupApp {
         let Some(job) = self.jobs.iter().find(|job| job.id == job_id).cloned() else {
             return;
         };
-        let passphrase = if self.passphrase.is_empty() {
-            self.form_passphrase.read(cx).value().to_string()
-        } else {
-            self.passphrase.clone()
-        };
+        let passphrase = self.current_passphrase(cx);
         if passphrase.is_empty() {
             self.toast = Some((true, format!("{} — {}", t.passphrase, t.settings)));
             self.section = Section::Settings;
@@ -512,12 +506,10 @@ impl RustBackupApp {
         cx.notify();
     }
 
-    fn passphrase_or_form(&self, cx: &gpui::Context<Self>) -> String {
-        if self.passphrase.is_empty() {
-            self.form_passphrase.read(cx).value().to_string()
-        } else {
-            self.passphrase.clone()
-        }
+    /// The repository passphrase typed in Settings: the single source of truth
+    /// for every operation that opens a repository.
+    fn current_passphrase(&self, cx: &gpui::Context<Self>) -> String {
+        self.form_passphrase.read(cx).value().to_string()
     }
 
     fn load_snapshots(&mut self, cx: &mut gpui::Context<Self>) {
@@ -529,7 +521,7 @@ impl RustBackupApp {
         let Some(job) = job else {
             return;
         };
-        let passphrase = self.passphrase_or_form(cx);
+        let passphrase = self.current_passphrase(cx);
         if passphrase.is_empty() {
             self.restore_result = Some((true, t.passphrase_needed.to_string()));
             cx.notify();
@@ -570,7 +562,7 @@ impl RustBackupApp {
         let Some(job) = job else {
             return;
         };
-        let passphrase = self.passphrase_or_form(cx);
+        let passphrase = self.current_passphrase(cx);
         if passphrase.is_empty() {
             self.restore_result = Some((true, t.passphrase_needed.to_string()));
             cx.notify();
@@ -723,7 +715,7 @@ impl RustBackupApp {
         let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
             return;
         };
-        let passphrase = self.passphrase_or_form(cx);
+        let passphrase = self.current_passphrase(cx);
         if passphrase.is_empty() {
             self.toast = Some((true, t.passphrase_needed.to_string()));
             cx.notify();
@@ -1057,7 +1049,7 @@ impl RustBackupApp {
         let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
             return;
         };
-        let passphrase = self.passphrase_or_form(cx);
+        let passphrase = self.current_passphrase(cx);
         if passphrase.is_empty() {
             self.toast = Some((true, t.passphrase_needed.to_string()));
             cx.notify();
@@ -1105,13 +1097,21 @@ impl RustBackupApp {
         job_id: JobId,
     ) {
         let t = self.texts();
-        if let Some(path) = self.catalog_path()
-            && let Ok(catalog) = Catalog::open(&path)
-            && catalog.delete_job(job_id).unwrap_or(false)
-        {
-            self.jobs.retain(|job| job.id != job_id);
-            self.recent_runs.retain(|(_, run)| run.job_id != job_id);
-            window.push_notification((NotificationType::Success, t.job_deleted), cx);
+        let outcome = Catalog::default_path()
+            .and_then(|path| Catalog::open(&path))
+            .and_then(|catalog| catalog.delete_job(job_id));
+        match outcome {
+            Ok(true) => {
+                self.jobs.retain(|job| job.id != job_id);
+                self.recent_runs.retain(|(_, run)| run.job_id != job_id);
+                window.push_notification((NotificationType::Success, t.job_deleted), cx);
+            }
+            // Already gone from the catalog: just refresh the view.
+            Ok(false) => self.refresh_catalog(),
+            Err(err) => {
+                self.toast = Some((true, err.to_string()));
+                self.auto_dismiss_toast(cx);
+            }
         }
         cx.notify();
     }
@@ -1126,7 +1126,14 @@ impl RustBackupApp {
         let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
             return;
         };
-        let rx = runner::spawn_delete_snapshot(job, self.passphrase.clone(), snapshot_id);
+        let passphrase = self.current_passphrase(cx);
+        if passphrase.is_empty() {
+            self.toast = Some((true, self.texts().passphrase_needed.to_string()));
+            self.auto_dismiss_toast(cx);
+            cx.notify();
+            return;
+        }
+        let rx = runner::spawn_delete_snapshot(job, passphrase, snapshot_id);
         cx.spawn(async move |this, cx| {
             if let Ok(res) = rx.recv_async().await {
                 let _ = this.update(cx, |this, cx| {
@@ -1164,9 +1171,16 @@ impl RustBackupApp {
         let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
             return;
         };
+        let passphrase = self.current_passphrase(cx);
+        if passphrase.is_empty() {
+            self.toast = Some((true, t.passphrase_needed.to_string()));
+            self.auto_dismiss_toast(cx);
+            cx.notify();
+            return;
+        }
         self.toast = Some((false, format!("{} …", t.pruning)));
         cx.notify();
-        let (rx, _cancel) = runner::spawn_prune(job, self.passphrase.clone());
+        let (rx, _cancel) = runner::spawn_prune(job, passphrase);
         let lang = self.lang;
         cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv_async().await {
@@ -2842,8 +2856,29 @@ impl RustBackupApp {
                             .ghost()
                             .label(t.prune)
                             .icon(IconName::Sparkles)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.prune_job(cx);
+                            .on_click(cx.listener({
+                                let entity = cx.entity().clone();
+                                move |this, _, window, cx| {
+                                    // Destructive on the destination: always confirm first.
+                                    let entity = entity.clone();
+                                    let t = this.texts();
+                                    window.open_alert_dialog(cx, move |alert, _, _| {
+                                        let target = entity.clone();
+                                        alert
+                                            .title(t.confirm_prune)
+                                            .description(t.confirm_prune_desc)
+                                            .confirm()
+                                            .ok_text(t.prune)
+                                            .ok_variant(ButtonVariant::Danger)
+                                            .cancel_text(t.cancel)
+                                            .on_ok(move |_, _, cx| {
+                                                target.update(cx, |this, cx| {
+                                                    this.prune_job(cx);
+                                                });
+                                                true
+                                            })
+                                    });
+                                }
                             })),
                     ),
             )
@@ -3453,14 +3488,15 @@ impl gpui::Render for RustBackupApp {
                     this.section = section;
                     cx.notify();
                 }));
-            if let Some(sc) = shortcut {
-                item = item.suffix(move |_, _| Kbd::new(gpui::Keystroke::parse(sc).unwrap()));
+            // An unparsable shortcut simply shows no hint instead of panicking.
+            if let Some(keystroke) = shortcut.and_then(|sc| gpui::Keystroke::parse(sc).ok()) {
+                item = item.suffix(move |_, _| Kbd::new(keystroke.clone()));
             }
             item
         };
 
         let (lock_icon, lock_label, lock_color) =
-            if self.passphrase.is_empty() && self.form_passphrase.read(cx).value().is_empty() {
+            if self.form_passphrase.read(cx).value().is_empty() {
                 (IconName::LockOpen, t.passphrase_unset, cx.theme().warning)
             } else {
                 (IconName::Lock, t.passphrase_set, cx.theme().success)

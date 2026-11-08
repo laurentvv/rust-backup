@@ -97,6 +97,7 @@ pub fn run_backup(
     mut on_event: impl FnMut(BackupEvent) -> crate::Result<()>,
 ) -> crate::Result<(SnapshotManifest, BackupStats)> {
     job.validate()?;
+    let _lock = repo.acquire_lock("backup")?;
     let chunker_cfg: ChunkerConfig = repo.config().chunker;
     let cancel = options.cancel.clone();
 

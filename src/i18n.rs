@@ -218,6 +218,20 @@ pub struct Texts {
     pub cancel_restore: &'static str,
     /// Restore cancelled.
     pub restore_cancelled: &'static str,
+    /// Prune button.
+    pub prune: &'static str,
+    /// Pruning in progress.
+    pub pruning: &'static str,
+    /// Prune complete.
+    pub prune_done: &'static str,
+    /// Delete snapshot.
+    pub delete_snapshot: &'static str,
+    /// Confirm delete snapshot.
+    pub confirm_delete_snapshot: &'static str,
+    /// Confirm delete snapshot description.
+    pub confirm_delete_snapshot_desc: &'static str,
+    /// Snapshot deleted toast.
+    pub snapshot_deleted: &'static str,
 }
 
 /// French strings.
@@ -324,6 +338,13 @@ pub const FR: Texts = Texts {
     restoring: "Restauration en cours…",
     cancel_restore: "Annuler la restauration",
     restore_cancelled: "Restauration annulée",
+    prune: "Nettoyer l'espace (Prune)",
+    pruning: "Nettoyage en cours…",
+    prune_done: "Nettoyage terminé",
+    delete_snapshot: "Supprimer",
+    confirm_delete_snapshot: "Supprimer l'instantané",
+    confirm_delete_snapshot_desc: "Supprimer définitivement cet instantané ? Ses données uniques pourront être purgées lors du nettoyage.",
+    snapshot_deleted: "Instantané supprimé",
 };
 
 /// English strings.
@@ -430,6 +451,13 @@ pub const EN: Texts = Texts {
     restoring: "Restoring files…",
     cancel_restore: "Cancel restore",
     restore_cancelled: "Restore cancelled",
+    prune: "Prune storage",
+    pruning: "Pruning in progress…",
+    prune_done: "Prune complete",
+    delete_snapshot: "Delete",
+    confirm_delete_snapshot: "Delete snapshot",
+    confirm_delete_snapshot_desc: "Permanently delete this snapshot? Unique chunks will be reclaimed on next prune.",
+    snapshot_deleted: "Snapshot deleted",
 };
 
 impl Lang {

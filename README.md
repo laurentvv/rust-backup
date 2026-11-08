@@ -48,37 +48,36 @@ Whether backing up directly to external USB drives, local NVMe volumes, or offsi
 - **Atomic Operations by Design**  
   All chunks and manifests land via temporary files and atomic rename. Interrupted or killed runs never produce a corrupted snapshot. Source files are opened read-only and **never modified or deleted**.
 - **Partial & Granular Restores**  
-  Restore single files or entire directory subtrees to their original paths or a custom destination, with skip/overwrite policies and exact modification time (`mtime`) restoration.
+  Restore single files or entire directory subtrees to their original paths or a custom destination, with hierarchical tree browsing, skip/overwrite policies, and exact modification time (`mtime`) restoration.
 - **Dual-Depth Integrity Verification**  
   - **Quick**: Validates manifest cryptographic authentication and referenced chunk presence.
   - **Full**: Reads, decrypts, and re-computes BLAKE3 hashes for every chunk to detect silent bit rot.
+- **Snapshot Deletion & Orphan Chunk Pruning (Garbage Collection)**  
+  Safely delete obsolete snapshot manifests with interactive modal confirmation (`AlertDialog`). Reclaim storage space by unlinking unreferenced orphan chunks while preserving shared data.
+- **Cooperative Exclusive Repository Locking**  
+  Prevents conflicting concurrent backups or maintenance runs across processes or threads via atomic JSON locks (`locks/<id>.json`) with automatic release on drop and stale-lock recovery.
 - **Local DuckDB Tracking Catalog**  
   High-performance local embedded database tracking jobs, execution statistics, snapshot metadata, and verification history.
 - **Hardware-Accelerated Native GUI**  
-  Built with **GPUI Kit 0.9.0**, rendering at 120 FPS with minimal memory overhead, bilingual French (default) / English interface, and steel-blue / dark theme support.
+  Built with **GPUI Kit 0.9.0**, rendering at 120 FPS with minimal memory overhead, bilingual French (default) / English interface, keyboard shortcuts (`Ctrl+1..4`, `Ctrl+B`, `Ctrl+,`), and steel-blue / dark theme support.
 
 ---
 
 ## 🖼️ Application Preview
 
-> [!NOTE]
-> **Interface Showcase in Progress**: High-resolution screenshots and animated workflow GIFs will be embedded here upon finalization of the user interface revamp.
+<p align="center">
+  <img src="assets/screenshots/rustbackup-walkthrough.gif" alt="RustBackup Native GPUI Walkthrough" width="90%" />
+</p>
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  RustBackup — Encrypted, deduplicated backups                          │
-├───────────────┬────────────────────────────────────────────────────────┤
-│ ❖ RustBackup  │ Dashboard                                              │
-│               │                                                        │
-│ ▤ Dashboard   │  ┌──────────────┐ ┌──────────────┐ ┌────────────────┐  │
-│ 🗄 Backups    │  │ Jobs: 2      │ │ Snaps: 5     │ │ Volume: 205 MB │  │
-│ ▷ Run Live    │  └──────────────┘ └──────────────┘ └────────────────┘  │
-│ 🗃 Restore    │                                                        │
-│ 🕒 History    │  Protected Volume History                              │
-│ ⚙ Settings    │  git-repo  [================================] 205.9 MB │
-│               │  documents [========================] 120.4 MB         │
-└───────────────┴────────────────────────────────────────────────────────┘
-```
+### 📸 Native GPUI Interface Views
+
+| **Dashboard (Protected Volumes & Stats)** | **Backup Jobs & Destination Config** |
+| :---: | :---: |
+| ![Dashboard](assets/screenshots/01-dashboard.png) | ![Jobs](assets/screenshots/02-jobs.png) |
+| **Granular Restore & Prune Maintenance** | **Execution & Verification History** |
+| ![Restore](assets/screenshots/04-restore.png) | ![History](assets/screenshots/05-history.png) |
+| **Settings & Bilingual Switch (FR/EN)** | **Dark Mode & Hardware Acceleration** |
+| ![Settings](assets/screenshots/06-settings.png) | ![Dark Mode](assets/screenshots/08-dashboard-dark.png) |
 
 ---
 
@@ -168,6 +167,12 @@ rbackup verify --job work-docs --full
 
 # 6. Restore files or folders
 rbackup restore --job work-docs --snapshot <snapshot-uuid> --path Documents/project --to D:\Restored
+
+# 7. Delete an obsolete snapshot
+rbackup delete-snapshot --job work-docs --snapshot <snapshot-uuid>
+
+# 8. Prune orphan chunks to reclaim storage
+rbackup prune --job work-docs
 ```
 
 ---

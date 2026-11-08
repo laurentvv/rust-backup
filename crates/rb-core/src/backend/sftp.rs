@@ -188,6 +188,17 @@ impl StorageBackend for SftpBackend {
         sorted.sort();
         Ok(sorted)
     }
+
+    fn remove(&self, rel: &str) -> crate::Result<()> {
+        let path = self.remote_path(rel);
+        let sftp = Arc::clone(&self.sftp);
+        self.runtime.block_on(async move {
+            if sftp.metadata(&path).await.is_ok() {
+                sftp.remove_file(&path).await?;
+            }
+            Ok(())
+        })
+    }
 }
 
 async fn connect_inner(params: &SftpConnect) -> crate::Result<SftpSession> {

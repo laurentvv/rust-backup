@@ -87,6 +87,21 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Delete a snapshot manifest and catalog entry.
+    DeleteSnapshot {
+        /// Job name or id.
+        #[arg(long)]
+        job: String,
+        /// Snapshot id to delete.
+        #[arg(long)]
+        snapshot: Uuid,
+    },
+    /// Prune unreferenced orphan chunks from the repository.
+    Prune {
+        /// Job name or id.
+        #[arg(long)]
+        job: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -401,6 +416,33 @@ fn main() -> anyhow::Result<()> {
             if !report.ok() {
                 std::process::exit(2);
             }
+        }
+        Command::DeleteSnapshot { job, snapshot } => {
+            let catalog = Catalog::open(&db_path)?;
+            let config = find_job(&catalog, &job)?;
+            let passphrase = read_passphrase()?;
+            let repo = open_repo(&config, &passphrase, cli.insecure_accept_any_host_key)?;
+            repo.delete_snapshot(&snapshot)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let _ = catalog.delete_snapshot(snapshot);
+            println!("snapshot {snapshot} deleted");
+        }
+        Command::Prune { job } => {
+            let catalog = Catalog::open(&db_path)?;
+            let config = find_job(&catalog, &job)?;
+            let passphrase = read_passphrase()?;
+            let repo = open_repo(&config, &passphrase, cli.insecure_accept_any_host_key)?;
+            let report = repo
+                .prune_orphans(None, |cur, tot| {
+                    if tot > 0 && cur % 100 == 0 {
+                        eprintln!("scanning chunks: {cur}/{tot}...");
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!(e))?;
+            println!(
+                "prune complete: {} orphan chunks deleted ({} bytes freed), {} preserved",
+                report.chunks_deleted, report.bytes_freed, report.chunks_kept
+            );
         }
     }
     Ok(())

@@ -93,6 +93,14 @@ impl StorageBackend for LocalFs {
         out.sort();
         Ok(out)
     }
+
+    fn remove(&self, rel: &str) -> crate::Result<()> {
+        let target = self.resolve(rel);
+        if target.exists() {
+            std::fs::remove_file(&target)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

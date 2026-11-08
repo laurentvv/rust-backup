@@ -13,6 +13,8 @@
 //! plain_len as associated data. Snapshot layout: `RBSN` magic | version
 //! u8 | plain_len u64 LE | sealed manifest, AD = snapshot id + plain_len.
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -43,6 +45,67 @@ pub struct RepoConfig {
     pub compression_level: i32,
     /// When the repository was created (UTC).
     pub created_at: DateTime<Utc>,
+}
+
+/// Report returned by [`Repository::prune_orphans`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneReport {
+    /// Number of orphan chunks deleted.
+    pub chunks_deleted: u64,
+    /// Sum of bytes freed (stored compressed/sealed chunk blob sizes).
+    pub bytes_freed: u64,
+    /// Number of chunks preserved (referenced by at least one snapshot).
+    pub chunks_kept: u64,
+}
+
+/// Exclusive lock information stored under `locks/<id>.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockInfo {
+    /// Unique identifier for this lock acquisition.
+    pub id: Uuid,
+    /// Hostname where the process is running.
+    pub hostname: String,
+    /// Operating system process ID holding the lock.
+    pub pid: u32,
+    /// When the lock was acquired (UTC).
+    pub created_at: DateTime<Utc>,
+    /// High-level operation ("backup", "prune", "delete_snapshot").
+    pub operation: String,
+}
+
+/// An exclusive repository lock handle. When dropped, the lock file on the
+/// backend is removed automatically.
+pub struct RepositoryLock {
+    backend: std::sync::Arc<dyn StorageBackend>,
+    lock_id: Uuid,
+    released: bool,
+}
+
+impl RepositoryLock {
+    /// Explicitly release the lock early.
+    pub fn release(mut self) -> crate::Result<()> {
+        if !self.released {
+            self.released = true;
+            let rel = format!("locks/{}.json", self.lock_id.simple());
+            self.backend.remove(&rel)?;
+        }
+        Ok(())
+    }
+
+    /// Unique lock identifier.
+    #[must_use]
+    pub fn id(&self) -> Uuid {
+        self.lock_id
+    }
+}
+
+impl Drop for RepositoryLock {
+    fn drop(&mut self) {
+        if !self.released {
+            let rel = format!("locks/{}.json", self.lock_id.simple());
+            let _ = self.backend.remove(&rel);
+        }
+    }
 }
 
 /// An opened backup repository with the master key derived.
@@ -332,6 +395,137 @@ impl Repository {
             .find(|m| &m.job_id == job_id))
     }
 
+    /// Acquires an exclusive write lock on the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RepositoryLocked`](crate::Error::RepositoryLocked) if an
+    /// active lock is held by another process or operation. Stale locks (> 24
+    /// hours) are broken automatically.
+    pub fn acquire_lock(&self, operation: &str) -> crate::Result<RepositoryLock> {
+        let _ = self.backend.mkdirs("locks");
+        let existing = self.backend.list("locks")?;
+        let now = Utc::now();
+        let stale_threshold = chrono::Duration::hours(24);
+
+        for rel in existing {
+            if !rel.ends_with(".json") {
+                continue;
+            }
+            if let Ok(data) = self.backend.read(&rel)
+                && let Ok(info) = serde_json::from_slice::<LockInfo>(&data)
+            {
+                let age = now.signed_duration_since(info.created_at);
+                if age < stale_threshold {
+                    return Err(crate::Error::RepositoryLocked(format!(
+                        "operation '{}' by PID {} on host '{}' since {}",
+                        info.operation, info.pid, info.hostname, info.created_at
+                    )));
+                }
+                // Stale lock: break it.
+                let _ = self.backend.remove(&rel);
+            }
+        }
+
+        let lock_id = Uuid::new_v4();
+        let hostname = std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "localhost".to_string());
+        let info = LockInfo {
+            id: lock_id,
+            hostname,
+            pid: std::process::id(),
+            created_at: now,
+            operation: operation.to_string(),
+        };
+        let rel = format!("locks/{}.json", lock_id.simple());
+        let json = serde_json::to_string_pretty(&info)?;
+        self.backend.write_atomic(&rel, json.as_bytes())?;
+
+        Ok(RepositoryLock {
+            backend: std::sync::Arc::clone(&self.backend),
+            lock_id,
+            released: false,
+        })
+    }
+
+    /// Deletes a snapshot manifest from the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RepositoryLocked`](crate::Error::RepositoryLocked) if
+    /// locked, or IO errors.
+    pub fn delete_snapshot(&self, snapshot_id: &Uuid) -> crate::Result<()> {
+        let _lock = self.acquire_lock("delete_snapshot")?;
+        let rel = format!("snapshots/{}.snap", snapshot_id.simple());
+        self.backend.remove(&rel)?;
+        Ok(())
+    }
+
+    /// Scans the repository for chunks that are no longer referenced by ANY
+    /// snapshot manifest, and unlinks them to reclaim storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RepositoryLocked`](crate::Error::RepositoryLocked),
+    /// [`Error::Cancelled`](crate::Error::Cancelled) if cooperative cancellation
+    /// is triggered, or IO errors.
+    pub fn prune_orphans(
+        &self,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+        mut on_progress: impl FnMut(u64, u64),
+    ) -> crate::Result<PruneReport> {
+        let _lock = self.acquire_lock("prune")?;
+
+        // 1. Collect all referenced chunk hashes from all existing manifests.
+        let manifests = self.all_manifests()?;
+        let mut referenced: HashSet<ChunkHash> = HashSet::new();
+        for m in &manifests {
+            for s in &m.sources {
+                for f in &s.entries {
+                    for c in &f.chunks {
+                        referenced.insert(c.hash);
+                    }
+                }
+            }
+        }
+
+        // 2. Scan every stored chunk file on the backend.
+        let chunk_files = self.list_chunks()?;
+        let total = chunk_files.len() as u64;
+        let mut report = PruneReport::default();
+
+        for (ix, rel) in chunk_files.into_iter().enumerate() {
+            if let Some(c) = cancel
+                && c.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(crate::Error::Cancelled);
+            }
+            on_progress(ix as u64, total);
+
+            if !rel.ends_with(".chunk") {
+                continue;
+            }
+            let stem = rel
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches(".chunk");
+            if let Ok(hash) = ChunkHash::from_hex(stem) {
+                if referenced.contains(&hash) {
+                    report.chunks_kept += 1;
+                } else {
+                    let len = self.backend.read(&rel).map(|b| b.len() as u64).unwrap_or(0);
+                    self.backend.remove(&rel)?;
+                    report.chunks_deleted += 1;
+                    report.bytes_freed += len;
+                }
+            }
+        }
+        on_progress(total, total);
+        Ok(report)
+    }
+
     fn unpack<'a>(blob: &'a [u8], magic: &[u8; 4]) -> crate::Result<(&'a [u8], u64)> {
         if blob.len() < HEADER_SIZE || &blob[..4] != magic {
             return Err(crate::Error::Repo("corrupt blob header".into()));
@@ -453,6 +647,77 @@ mod tests {
         let backend = std::sync::Arc::new(LocalFs::new(&dir));
         let err = Repository::open(backend, "whatever").unwrap_err();
         assert!(matches!(err, crate::Error::Repo(_)), "got {err:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exclusive_lock_prevents_concurrent_access_and_releases_on_drop() {
+        let (dir, repo) = temp_repo();
+        let lock1 = repo.acquire_lock("first_op").expect("acquire lock 1");
+        assert!(
+            repo.acquire_lock("second_op").is_err(),
+            "concurrent lock must fail"
+        );
+        drop(lock1);
+        let lock2 = repo
+            .acquire_lock("third_op")
+            .expect("acquire lock 2 after drop");
+        drop(lock2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_snapshot_removes_manifest_and_leaves_others_intact() {
+        let (dir, repo) = temp_repo();
+        let m1 = SnapshotManifest::new(Uuid::new_v4(), "job1");
+        let m2 = SnapshotManifest::new(Uuid::new_v4(), "job2");
+        repo.write_manifest(&m1).expect("write m1");
+        repo.write_manifest(&m2).expect("write m2");
+        assert_eq!(repo.list_snapshot_ids().expect("ids").len(), 2);
+
+        repo.delete_snapshot(&m1.id).expect("delete m1");
+        let ids = repo.list_snapshot_ids().expect("ids after delete");
+        assert_eq!(ids, vec![m2.id]);
+        assert!(repo.read_manifest(&m1.id).is_err());
+        assert!(repo.read_manifest(&m2.id).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_orphans_cleans_unreferenced_chunks_and_keeps_live_ones() {
+        let (dir, repo) = temp_repo();
+        // 1. Store two chunks
+        let data1 = vec![10u8; 1000];
+        let hash1 = ChunkHash::from_data(&data1);
+        repo.store_chunk(&hash1, &data1).expect("store 1");
+
+        let data2 = vec![20u8; 2000];
+        let hash2 = ChunkHash::from_data(&data2);
+        repo.store_chunk(&hash2, &data2).expect("store 2");
+
+        // 2. Snapshot references ONLY chunk1
+        let mut m = SnapshotManifest::new(Uuid::new_v4(), "job");
+        m.sources.push(crate::manifest::SourceSnapshot {
+            root: std::path::PathBuf::from(r"C:\test"),
+            entries: vec![crate::manifest::FileEntry {
+                path: std::path::PathBuf::from("file1.bin"),
+                size: 1000,
+                mtime_ns: 0,
+                chunks: vec![crate::manifest::ChunkRef {
+                    hash: hash1,
+                    plain_len: 1000,
+                }],
+                kind: crate::manifest::EntryKind::File,
+            }],
+        });
+        repo.write_manifest(&m).expect("write m");
+
+        // 3. Prune: chunk2 should be deleted, chunk1 kept
+        let report = repo.prune_orphans(None, |_, _| {}).expect("prune");
+        assert_eq!(report.chunks_deleted, 1);
+        assert_eq!(report.chunks_kept, 1);
+        assert!(repo.chunk_exists(&hash1).expect("chunk1 exists"));
+        assert!(!repo.chunk_exists(&hash2).expect("chunk2 pruned"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

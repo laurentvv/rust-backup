@@ -351,3 +351,54 @@ fn second_repository_on_same_dest_is_refused() {
         .is_err()
     );
 }
+
+#[test]
+fn snapshot_deletion_and_prune_reclaims_orphan_chunks() {
+    let fixture = fixture("prune");
+    let (s1, stats1) = backup(&fixture);
+    assert_eq!(stats1.files_total, 4);
+
+    // Add unique file to source, run second backup
+    let extra = fixture.source.join("unique_to_s2.bin");
+    std::fs::write(&extra, random_bytes(200_000, 999)).expect("write extra");
+    let (s2, stats2) = backup(&fixture);
+    assert_eq!(stats2.files_total, 5);
+
+    // Delete snapshot 2: extra file's chunks become orphans
+    fixture
+        .repo
+        .delete_snapshot(&s2.id)
+        .expect("delete snapshot 2");
+    let snapshots = fixture.repo.list_snapshot_ids().expect("list snapshots");
+    assert_eq!(snapshots, vec![s1.id]);
+
+    // Prune orphans
+    let report = fixture.repo.prune_orphans(None, |_, _| {}).expect("prune");
+    assert!(report.chunks_deleted > 0, "orphan chunks must be deleted");
+    assert!(report.bytes_freed > 0, "bytes must be freed");
+    assert!(report.chunks_kept > 0, "live chunks must be preserved");
+
+    // Snapshot 1 is still fully readable
+    let back1 = fixture.repo.read_manifest(&s1.id).expect("read s1");
+    assert_eq!(back1.id, s1.id);
+}
+
+#[test]
+fn concurrent_run_backup_is_refused_by_lock() {
+    let fixture = fixture("concurrency");
+    let _lock = fixture
+        .repo
+        .acquire_lock("external_op")
+        .expect("acquire lock");
+    let err = run_backup(
+        &fixture.repo,
+        &fixture.job,
+        &BackupOptions::default(),
+        |_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, rb_core::Error::RepositoryLocked(_)),
+        "expected RepositoryLocked, got {err:?}"
+    );
+}

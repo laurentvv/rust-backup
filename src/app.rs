@@ -1090,6 +1090,93 @@ impl RustBackupApp {
         cx.notify();
     }
 
+    fn delete_snapshot(&mut self, cx: &mut gpui::Context<Self>, snapshot_id: Uuid) {
+        let Some(job_id) = self
+            .selected_restore_job
+            .or_else(|| self.jobs.first().map(|j| j.id))
+        else {
+            return;
+        };
+        let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
+            return;
+        };
+        let rx = runner::spawn_delete_snapshot(job, self.passphrase.clone(), snapshot_id);
+        cx.spawn(async move |this, cx| {
+            if let Ok(res) = rx.recv_async().await {
+                let _ = this.update(cx, |this, cx| {
+                    match res {
+                        Ok(()) => {
+                            this.snapshots.retain(|s| s.id != snapshot_id);
+                            if this.selected_snapshot == Some(snapshot_id) {
+                                this.selected_snapshot = None;
+                                this.selected_paths.clear();
+                            }
+                            this.refresh_catalog();
+                            this.toast = Some((false, this.texts().snapshot_deleted.to_string()));
+                            this.auto_dismiss_toast(cx);
+                        }
+                        Err(err) => {
+                            this.toast = Some((true, err));
+                            this.auto_dismiss_toast(cx);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn prune_job(&mut self, cx: &mut gpui::Context<Self>) {
+        let t = self.texts();
+        let Some(job_id) = self
+            .selected_restore_job
+            .or_else(|| self.jobs.first().map(|j| j.id))
+        else {
+            return;
+        };
+        let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
+            return;
+        };
+        self.toast = Some((false, format!("{} …", t.pruning)));
+        cx.notify();
+        let (rx, _cancel) = runner::spawn_prune(job, self.passphrase.clone());
+        let lang = self.lang;
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv_async().await {
+                match event {
+                    runner::PruneEvent::Progress { .. } => {}
+                    runner::PruneEvent::Finished(res) => {
+                        let _ = this.update(cx, |this, cx| {
+                            match res {
+                                Ok(report) => {
+                                    let msg = format!(
+                                        "{}: {} {} ({})",
+                                        this.texts().prune_done,
+                                        report.chunks_deleted,
+                                        this.texts().new_chunks,
+                                        human_bytes_lang(report.bytes_freed, lang)
+                                    );
+                                    this.toast = Some((false, msg));
+                                    this.auto_dismiss_toast(cx);
+                                    this.load_snapshots(cx);
+                                    this.refresh_catalog();
+                                }
+                                Err(err) => {
+                                    this.toast = Some((true, err));
+                                    this.auto_dismiss_toast(cx);
+                                }
+                            }
+                            cx.notify();
+                        });
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
     fn cancel_run(&mut self, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         if let Some(flag) = &self.cancel {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2302,6 +2389,7 @@ impl RustBackupApp {
                 h_flex()
                     .id(gpui::SharedString::new(row.id.to_string()))
                     .justify_between()
+                    .items_center()
                     .p_2()
                     .rounded_md()
                     .when(is_selected, |this| {
@@ -2311,23 +2399,66 @@ impl RustBackupApp {
                         this.border_1().border_color(cx.theme().border)
                     })
                     .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(row.created_at.clone()),
+                        h_flex()
+                            .flex_1()
+                            .gap_4()
+                            .items_center()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(row.created_at.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .child(format!("{} {}", row.files, t.files)),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.selected_snapshot = Some(row_id);
+                                    this.selected_paths.clear();
+                                    cx.notify();
+                                }),
+                            ),
                     )
                     .child(
-                        div()
-                            .text_size(px(12.0))
-                            .child(format!("{} {}", row.files, t.files)),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.selected_snapshot = Some(row_id);
-                            this.selected_paths.clear();
-                            cx.notify();
-                        }),
+                        Button::new(gpui::SharedString::new(format!(
+                            "del-snap-{}",
+                            row.id.simple()
+                        )))
+                        .ghost()
+                        .icon(IconName::Trash)
+                        .on_click(cx.listener({
+                            let entity = cx.entity().clone();
+                            let snap_date = row.created_at.clone();
+                            move |this, _, window, cx| {
+                                let entity = entity.clone();
+                                let snap_date = snap_date.clone();
+                                let t = this.texts();
+                                window.open_alert_dialog(cx, move |alert, _, _| {
+                                    let target = entity.clone();
+                                    alert
+                                        .title(t.confirm_delete_snapshot)
+                                        .description(format!(
+                                            "{} ({})",
+                                            t.confirm_delete_snapshot_desc, snap_date
+                                        ))
+                                        .confirm()
+                                        .ok_text(t.delete)
+                                        .ok_variant(ButtonVariant::Danger)
+                                        .cancel_text(t.cancel)
+                                        .on_ok(move |_, _, cx| {
+                                            target.update(cx, |this, cx| {
+                                                this.delete_snapshot(cx, row_id);
+                                            });
+                                            true
+                                        })
+                                });
+                            }
+                        })),
                     )
                     .into_any_element()
             })
@@ -2600,12 +2731,26 @@ impl RustBackupApp {
             .when_some(restore_progress_card, |this, pc| this.child(pc))
             .when_some(banner, |this, b| this.child(b))
             .child(
-                Button::new("reload-snapshots")
-                    .label(format!("{} ({})", t.snapshots, t.refresh))
-                    .icon(IconName::RefreshCcw)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.load_snapshots(cx);
-                    })),
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        Button::new("reload-snapshots")
+                            .label(format!("{} ({})", t.snapshots, t.refresh))
+                            .icon(IconName::RefreshCcw)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.load_snapshots(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("prune-btn")
+                            .ghost()
+                            .label(t.prune)
+                            .icon(IconName::Sparkles)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.prune_job(cx);
+                            })),
+                    ),
             )
             .child(if self.snapshots.is_empty() {
                 div()

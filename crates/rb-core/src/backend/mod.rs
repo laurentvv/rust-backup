@@ -59,4 +59,11 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// Returns [`Error::Io`](crate::Error::Io) when listing fails.
     fn list(&self, prefix: &str) -> crate::Result<Vec<String>>;
+
+    /// Removes a repository file if it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`](crate::Error::Io) on failure.
+    fn remove(&self, rel: &str) -> crate::Result<()>;
 }

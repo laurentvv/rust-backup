@@ -21,6 +21,7 @@ rand = "0.9"
 zeroize = { version = "1", features = ["derive"] }
 walkdir = "2"
 filetime = "0.2"
+flume = "0.12"
 russh = "0.65"
 russh-sftp = "3.0"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }

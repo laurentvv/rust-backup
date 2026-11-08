@@ -406,6 +406,191 @@ fn concurrent_run_backup_is_refused_by_lock() {
 }
 
 #[test]
+fn identical_files_within_one_run_are_stored_once() {
+    let fixture = fixture("withindup");
+    // Two byte-identical files: the pipeline's within-run dedup guard
+    // must upload the shared chunks exactly once.
+    let payload = random_bytes(700_000, 777);
+    std::fs::write(fixture.source.join("one.bin"), &payload).expect("one");
+    std::fs::write(fixture.source.join("two.bin"), &payload).expect("two");
+
+    let (manifest, stats) = backup(&fixture);
+
+    let backend = LocalFs::new(&fixture.dest);
+    let chunk_files = backend.list("chunks").expect("chunks");
+    assert_eq!(
+        chunk_files.len() as u64,
+        stats.chunks_new,
+        "one physical chunk file per new chunk, no duplicates"
+    );
+    assert!(stats.chunks_new > 0);
+
+    // Both manifest entries reference the same chunk list.
+    let entry = |name: &str| {
+        manifest
+            .iter_files()
+            .find(|(_, e)| e.path.to_string_lossy() == name)
+            .map(|(_, e)| e.chunks.clone())
+            .expect(name)
+    };
+    assert_eq!(entry("one.bin"), entry("two.bin"));
+}
+
+/// Bulk test payload with a per-salt unique 32-byte prefix: guarantees
+/// distinct first chunks by construction, whatever the xorshift seed does
+/// (consecutive seeds of `random_bytes` can alias onto shared cycles —
+/// correct dedup then legitimately collapses them).
+fn distinct_bulk(len: usize, salt: u64) -> Vec<u8> {
+    let mut data = ChunkHash::from_data(&salt.to_le_bytes())
+        .as_bytes()
+        .to_vec();
+    data.extend_from_slice(&random_bytes(len - 32, salt));
+    data
+}
+
+#[test]
+fn parallel_pipeline_writes_valid_chunks_and_no_temp_leftovers() {
+    let fixture = fixture("parallel");
+    // Enough distinct mid-size files to keep four upload writers and the
+    // compress workers busy concurrently.
+    for i in 0u64..40 {
+        std::fs::write(
+            fixture.source.join(format!("f{i:03}.bin")),
+            distinct_bulk(300_000, 1000 + i),
+        )
+        .expect("bulk file");
+    }
+
+    let (manifest, stats) = backup(&fixture);
+    assert!(
+        stats.chunks_new > 40,
+        "expected many chunks, got {}",
+        stats.chunks_new
+    );
+
+    let backend = LocalFs::new(&fixture.dest);
+    let chunk_files = backend.list("chunks").expect("chunks");
+    assert_eq!(chunk_files.len() as u64, stats.chunks_new);
+    assert!(
+        chunk_files.iter().all(|rel| rel.ends_with(".chunk")),
+        "no temp files may survive a successful run: {chunk_files:?}"
+    );
+
+    // Round-trip a sample of chunks through decrypt+decompress: parallel
+    // writers must produce exactly the bytes the manifest references.
+    let mut sample = 0u64;
+    for (_, entry) in manifest.iter_files().take(6) {
+        for cref in &entry.chunks {
+            let plain = fixture
+                .repo
+                .read_chunk(&cref.hash, cref.plain_len)
+                .expect("read back chunk");
+            assert_eq!(plain.len() as u64, cref.plain_len);
+            sample += 1;
+        }
+    }
+    assert!(sample > 0);
+}
+
+/// Backend whose chunk writers fail after N successful writes — proves the
+/// pipeline propagates upload failures and never finalizes a manifest.
+struct FailingBackend {
+    inner: LocalFs,
+    writes: Arc<AtomicU64>,
+    fail_at: u64,
+}
+
+impl StorageBackend for FailingBackend {
+    fn kind(&self) -> &'static str {
+        "failing"
+    }
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn read(&self, rel: &str) -> rb_core::Result<Vec<u8>> {
+        self.inner.read(rel)
+    }
+    fn write_atomic(&self, rel: &str, data: &[u8]) -> rb_core::Result<()> {
+        self.inner.write_atomic(rel, data)
+    }
+    fn exists(&self, rel: &str) -> rb_core::Result<bool> {
+        self.inner.exists(rel)
+    }
+    fn mkdirs(&self, rel: &str) -> rb_core::Result<()> {
+        self.inner.mkdirs(rel)
+    }
+    fn list(&self, prefix: &str) -> rb_core::Result<Vec<String>> {
+        self.inner.list(prefix)
+    }
+    fn remove(&self, rel: &str) -> rb_core::Result<()> {
+        self.inner.remove(rel)
+    }
+    fn open_writer(&self) -> rb_core::Result<Box<dyn rb_core::backend::ChunkWriter>> {
+        Ok(Box::new(FailingWriter {
+            inner: LocalFs::new(self.inner.root().to_path_buf()),
+            writes: Arc::clone(&self.writes),
+            fail_at: self.fail_at,
+        }))
+    }
+}
+
+struct FailingWriter {
+    inner: LocalFs,
+    writes: Arc<AtomicU64>,
+    fail_at: u64,
+}
+
+impl rb_core::backend::ChunkWriter for FailingWriter {
+    fn write_new(&mut self, rel: &str, data: &[u8]) -> rb_core::Result<()> {
+        let count = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+        if count >= self.fail_at {
+            return Err(rb_core::Error::Repo("injected upload failure".into()));
+        }
+        self.inner.write_atomic(rel, data)
+    }
+}
+
+#[test]
+fn upload_failure_aborts_run_and_leaves_no_manifest() {
+    let fixture = fixture("uploadfail");
+    for i in 0u64..10 {
+        std::fs::write(
+            fixture.source.join(format!("g{i:02}.bin")),
+            distinct_bulk(400_000, 2000 + i),
+        )
+        .expect("bulk file");
+    }
+
+    // Reopen the same destination through the failing backend.
+    let failing = FailingBackend {
+        inner: LocalFs::new(&fixture.dest),
+        writes: Arc::new(AtomicU64::new(0)),
+        fail_at: 3,
+    };
+    let repo = Repository::open(Arc::new(failing), "integration passphrase")
+        .expect("open via failing backend");
+
+    let err = run_backup(&repo, &fixture.job, &BackupOptions::default(), |_| Ok(()))
+        .expect_err("run must fail when uploads fail");
+    assert!(
+        err.to_string().contains("injected upload failure"),
+        "unexpected error: {err}"
+    );
+
+    let backend = LocalFs::new(&fixture.dest);
+    assert_eq!(
+        backend.list("snapshots").expect("snapshots").len(),
+        0,
+        "failed run must never leave a manifest"
+    );
+
+    // A later healthy run still succeeds and dedups against whatever
+    // chunks the failed run managed to land.
+    let (_m, s) = backup(&fixture);
+    assert!(s.chunks_new > 0);
+}
+
+#[test]
 fn cadence_schedules_full_after_x_incrementals_and_force_full_works() {
     use rb_core::domain::BackupKind;
 

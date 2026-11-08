@@ -93,6 +93,24 @@ Whether backing up directly to external USB drives, local NVMe volumes, or offsi
 | **Integrity Verify** | 6,418 chunks | 108 MB | **2.1 s** | 0 corruptions, 0 orphans | Full BLAKE3 verify |
 | **File Restore** | 20.6 MB DLL + 4.7 MB GIF | 25.3 MB | **0.18 s** | Restored byte-identical | SHA-256 match 100% |
 
+### 🔀 SFTP Pipeline Throughput (LAN, NTFS-via-FUSE destination)
+
+*Same synthetic corpus (805 files, 1.04 GiB, 1 221 chunks) to `root@192.168.1.102:/mnt/backup` (NTFS mounted through ntfs-3g on Linux), RTT < 1 ms:*
+
+| Engine | Parallel upload channels | Wall time | Average throughput |
+| :-- | :--- | :--- | :--- |
+| v1 sequential (per-chunk SFTP round trips) | 1 | 299 s | 3.5 MiB/s |
+| **v2 pipeline (default)** | **4** | **127 s** | **8.2 MiB/s** |
+| **v2 pipeline, `RBACKUP_UPLOAD_WORKERS=8`** | **8** | **71 s** | **14.7 MiB/s** (peaks 28.7) |
+
+The storage engine pipelines: the walk thread only reads/chunks/hashes, worker threads
+compress and seal in parallel (all CPU cores), and dedicated SFTP channels upload and
+fsync concurrently. Dedup membership comes from an in-memory index built once per run —
+no per-chunk existence round trip. Per-chunk durability is unchanged (temp write → fsync →
+rename; manifests still finalized last). `RBACKUP_UPLOAD_WORKERS` is clamped to 16; note
+OpenSSH's `MaxSessions` (default 10, one is the control channel) caps channels per
+connection.
+
 ---
 
 ## 🏗️ Architecture & Crates
@@ -107,7 +125,7 @@ rust-backup (Cargo Workspace)
 │   ├── crypto.rs         MasterKey (zeroized), Argon2id wrap, AES-256-GCM AEAD
 │   ├── repo.rs           Repository v1 format (config, keys, chunks, snapshots)
 │   ├── manifest.rs       SnapshotManifest schema and serialization
-│   ├── backup.rs         Streaming walk -> chunk -> dedup -> atomic store
+│   ├── backup.rs         Pipelined walk -> chunk -> dedup index -> parallel store
 │   ├── restore.rs        Plan resolution -> streaming verify -> atomic restore
 │   ├── verify.rs         Quick & Full repository integrity verifier
 │   └── catalog.rs        DuckDB database migrations & analytics

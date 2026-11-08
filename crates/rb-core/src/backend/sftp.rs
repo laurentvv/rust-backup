@@ -1,12 +1,13 @@
 //! SFTP backend: repository on a remote Linux server, public-key auth.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::StorageBackend;
+use super::{ChunkWriter, StorageBackend};
 
 /// How the server's host key is checked during connection.
 #[derive(Debug, Clone)]
@@ -46,6 +47,9 @@ pub struct SftpConnect {
 pub struct SftpBackend {
     runtime: Arc<tokio::runtime::Runtime>,
     sftp: Arc<SftpSession>,
+    /// Live SSH connection: parallel chunk writers open extra SFTP channels
+    /// on it instead of paying a full connect+auth each.
+    session: Arc<russh::client::Handle<ClientHandler>>,
     remote_root: String,
     description: String,
 }
@@ -74,10 +78,11 @@ impl SftpBackend {
             .build()
             .map_err(|e| crate::Error::Io(std::io::Error::other(e.to_string())))?;
 
-        let sftp = runtime.block_on(connect_inner(params))?;
+        let (sftp, session) = runtime.block_on(connect_inner(params))?;
         Ok(Self {
             runtime: Arc::new(runtime),
             sftp: Arc::new(sftp),
+            session: Arc::new(session),
             remote_root: params.remote_root.clone(),
             description: format!(
                 "sftp: {}@{}:{}",
@@ -223,10 +228,98 @@ impl StorageBackend for SftpBackend {
             Ok(())
         })
     }
+
+    fn open_writer(&self) -> crate::Result<Box<dyn ChunkWriter>> {
+        let session = Arc::clone(&self.session);
+        let sftp = self
+            .runtime
+            .block_on(async { open_sftp_channel(&session).await })?;
+        Ok(Box::new(SftpChunkWriter {
+            runtime: Arc::clone(&self.runtime),
+            sftp: Arc::new(sftp),
+            remote_root: self.remote_root.clone(),
+            dirs: HashSet::new(),
+        }))
+    }
 }
 
-async fn connect_inner(params: &SftpConnect) -> crate::Result<SftpSession> {
-    let config = Arc::new(russh::client::Config::default());
+/// Parallel chunk writer over a dedicated SFTP channel.
+///
+/// Skips what the general-purpose [`StorageBackend::write_atomic`] must do
+/// per call: no existence probe (the pipeline's in-memory index plus the
+/// exclusive repository lock guarantee the target is absent) and no
+/// per-segment directory probing after the first write into a prefix
+/// directory. Durability is unchanged: temp name, `fsync@openssh.com`,
+/// rename.
+struct SftpChunkWriter {
+    runtime: Arc<tokio::runtime::Runtime>,
+    sftp: Arc<SftpSession>,
+    remote_root: String,
+    dirs: HashSet<String>,
+}
+
+impl ChunkWriter for SftpChunkWriter {
+    fn write_new(&mut self, rel: &str, data: &[u8]) -> crate::Result<()> {
+        let path = format!(
+            "{}/{}",
+            self.remote_root.trim_end_matches('/'),
+            rel.trim_start_matches('/')
+        );
+        let tmp = format!("{path}.tmp-{}", uuid::Uuid::new_v4().simple());
+        let parent = parent_of(&path);
+        let need_mkdirs = parent.as_ref().is_some_and(|p| !self.dirs.contains(p));
+
+        let sftp = Arc::clone(&self.sftp);
+        let mkdir_parent = parent.clone();
+        let result = self.runtime.block_on(async {
+            if need_mkdirs && let Some(parent) = &mkdir_parent {
+                mkdirs_remote(&sftp, parent).await?;
+            }
+            let written: crate::Result<()> = async {
+                let mut file = sftp
+                    .open_with_flags(
+                        &tmp,
+                        russh_sftp::protocol::OpenFlags::CREATE
+                            | russh_sftp::protocol::OpenFlags::WRITE
+                            | russh_sftp::protocol::OpenFlags::TRUNCATE,
+                    )
+                    .await?;
+                file.write_all(data).await?;
+                file.sync_all().await?;
+                file.shutdown().await?;
+                // SFTP v3 rename refuses an existing target, which is
+                // exactly the wanted behavior here: a target that already
+                // exists despite the index would be a bug worth failing on.
+                sftp.rename(&tmp, &path).await?;
+                Ok(())
+            }
+            .await;
+            if written.is_err() {
+                let _ = sftp.remove_file(&tmp).await;
+            }
+            written
+        });
+        // Cache the parent only after full success so a failed first write
+        // retries the directory check next time.
+        if result.is_ok()
+            && let Some(parent) = parent
+        {
+            self.dirs.insert(parent);
+        }
+        result
+    }
+}
+
+async fn connect_inner(
+    params: &SftpConnect,
+) -> crate::Result<(SftpSession, russh::client::Handle<ClientHandler>)> {
+    // The engine issues many small SFTP requests (open/write/fsync/rename);
+    // Nagle's algorithm would serialize each request/ack exchange behind
+    // delayed ACKs on every chunk.
+    let config = Arc::new(russh::client::Config {
+        nodelay: true,
+        ..russh::client::Config::default()
+    });
     let handler = ClientHandler {
         policy: params.host_key_policy.clone(),
         host_tag: format!("{}:{}", params.host, params.port),
@@ -253,6 +346,15 @@ async fn connect_inner(params: &SftpConnect) -> crate::Result<SftpSession> {
         ));
     }
 
+    let sftp = open_sftp_channel(&session).await?;
+    mkdirs_remote(&sftp, &params.remote_root).await?;
+    Ok((sftp, session))
+}
+
+/// Opens one more SFTP session on the live SSH connection.
+async fn open_sftp_channel(
+    session: &russh::client::Handle<ClientHandler>,
+) -> crate::Result<SftpSession> {
     let channel = session
         .channel_open_session()
         .await
@@ -261,12 +363,22 @@ async fn connect_inner(params: &SftpConnect) -> crate::Result<SftpSession> {
         .request_subsystem(true, "sftp")
         .await
         .map_err(|e| crate::Error::Io(std::io::Error::other(format!("subsystem: {e}"))))?;
-    let sftp = SftpSession::new(channel.into_stream())
+    SftpSession::new_with_config(channel.into_stream(), sftp_client_config())
         .await
-        .map_err(|e| crate::Error::Repo(format!("sftp init: {e}")))?;
+        .map_err(|e| crate::Error::Repo(format!("sftp init: {e}")))
+}
 
-    mkdirs_remote(&sftp, &params.remote_root).await?;
-    Ok(sftp)
+/// Tuned russh-sftp client config for bulk chunk traffic: large framed
+/// writes (fewer requests per chunk), deeper write pipelining and a
+/// timeout generous enough for a slow server-side fsync.
+fn sftp_client_config() -> russh_sftp::client::Config {
+    russh_sftp::client::Config {
+        max_packet_len: 262_144,
+        max_concurrent_reads: 16,
+        max_concurrent_writes: 32,
+        max_write_packet_len: 131_072,
+        request_timeout_secs: 60,
+    }
 }
 
 struct ClientHandler {

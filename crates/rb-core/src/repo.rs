@@ -262,9 +262,36 @@ impl Repository {
         self.backend.describe()
     }
 
-    fn chunk_rel(hash: &ChunkHash) -> String {
+    /// Storage backend of this repository (used by the backup pipeline to
+    /// open parallel chunk writers).
+    #[must_use]
+    pub fn backend(&self) -> &std::sync::Arc<dyn StorageBackend> {
+        &self.backend
+    }
+
+    /// Repo-relative path of a chunk file (`chunks/<2-hex>/<hash>.chunk`).
+    #[must_use]
+    pub fn chunk_rel(hash: &ChunkHash) -> String {
         let hex = hash.to_hex();
         format!("chunks/{}/{}.chunk", &hex[..2], hex)
+    }
+
+    /// Compresses, seals and frames `plaintext` into its stored chunk blob.
+    ///
+    /// # Errors
+    ///
+    /// Returns compression and crypto errors as usual.
+    pub fn seal_chunk_blob(&self, hash: &ChunkHash, plaintext: &[u8]) -> crate::Result<Vec<u8>> {
+        let packed = crate::compress::compress(plaintext, self.config.compression_level)?;
+        let sealed = self
+            .cipher
+            .seal(packed.as_slice(), hash, plaintext.len() as u64)?;
+        let mut blob = Vec::with_capacity(HEADER_SIZE + sealed.len());
+        blob.extend_from_slice(CHUNK_MAGIC);
+        blob.push(BLOB_VERSION);
+        blob.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
+        blob.extend_from_slice(&sealed);
+        Ok(blob)
     }
 
     /// Stores a chunk if not already present (dedup).
@@ -281,15 +308,7 @@ impl Repository {
         if self.backend.exists(&rel)? {
             return Ok(false);
         }
-        let packed = crate::compress::compress(plaintext, self.config.compression_level)?;
-        let sealed = self
-            .cipher
-            .seal(packed.as_slice(), hash, plaintext.len() as u64)?;
-        let mut blob = Vec::with_capacity(HEADER_SIZE + sealed.len());
-        blob.extend_from_slice(CHUNK_MAGIC);
-        blob.push(BLOB_VERSION);
-        blob.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
-        blob.extend_from_slice(&sealed);
+        let blob = self.seal_chunk_blob(hash, plaintext)?;
         self.backend.write_atomic(&rel, &blob)?;
         Ok(true)
     }

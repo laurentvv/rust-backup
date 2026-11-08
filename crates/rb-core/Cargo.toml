@@ -19,6 +19,7 @@ argon2.workspace = true
 rand.workspace = true
 zeroize.workspace = true
 walkdir.workspace = true
+flume.workspace = true
 filetime.workspace = true
 russh.workspace = true
 russh-sftp.workspace = true

@@ -164,10 +164,18 @@ pub struct Texts {
     pub compression: &'static str,
     /// Edit job button.
     pub edit: &'static str,
+    /// Delete job button.
+    pub delete: &'static str,
     /// Save job button.
     pub save: &'static str,
     /// Job updated toast.
     pub job_updated: &'static str,
+    /// Job deleted toast.
+    pub job_deleted: &'static str,
+    /// Confirm delete title.
+    pub confirm_delete: &'static str,
+    /// Confirm delete description.
+    pub confirm_delete_desc: &'static str,
     /// Initialize repository button.
     pub init_repo: &'static str,
     /// Repository initialized toast.
@@ -289,8 +297,12 @@ pub const FR: Texts = Texts {
     excludes_help: "target, node_modules, .git, *.tmp",
     compression: "Niveau de compression zstd",
     edit: "Modifier",
+    delete: "Supprimer",
     save: "Enregistrer",
     job_updated: "Configuration mise à jour",
+    job_deleted: "Tâche supprimée",
+    confirm_delete: "Confirmer la suppression",
+    confirm_delete_desc: "Supprimer définitivement cette tâche ? Les sauvegardes existantes restent intactes.",
     init_repo: "Initialiser le dépôt",
     repo_initialized: "Dépôt initialisé avec succès",
     verify_quick: "Rapide (métadonnées)",
@@ -391,8 +403,12 @@ pub const EN: Texts = Texts {
     excludes_help: "target, node_modules, .git, *.tmp",
     compression: "zstd compression level",
     edit: "Edit",
+    delete: "Delete",
     save: "Save",
     job_updated: "Job updated",
+    job_deleted: "Job deleted",
+    confirm_delete: "Confirm deletion",
+    confirm_delete_desc: "Permanently delete this job? Existing backups remain intact.",
     init_repo: "Initialize repository",
     repo_initialized: "Repository initialized successfully",
     verify_quick: "Quick (metadata)",

@@ -1,8 +1,8 @@
 # Brand directions (J3.2) — decision gate
 
-> Status: **decided 2026-11-08 — hybrid Strata + Ferrite, product name unchanged (RustBackup / rust-backup)**
-> (see "Decision record" at the end). J3.3 starts from the hybrid definition below; J3.5 (rename) is dropped.
-> Nothing downstream (J3.3 design system, J3.4 illustrations, J3.5 rename) starts before that choice.
+> Status: **decided 2026-11-08 — direction C · Arche, product name unchanged (RustBackup / rust-backup)**.
+> The earlier hybrid Strata + Ferrite choice is superseded (see "Decision record"). J3.3 starts from the
+> Arche definition below; J3.5 (rename) is dropped.
 > Inputs: `docs/design/research/README.md` (J3.1). Visual comparison: `docs/design/directions/comparison.html`
 > (also published as a private Artifact). Logo sketches: `docs/design/directions/*-mark.svg`.
 
@@ -151,27 +151,27 @@ yet — that check is part of J3.5 before any rename.
 
 | Date | Decision | By |
 |---|---|---|
-| 2026-11-08 | Direction: **hybrid Strata + Ferrite** | owner |
-| 2026-11-08 | Name: **keep the original name** — RustBackup (display) / `rust-backup` (repository). No rename, no data-folder migration, no trademark check; lot J3.5 is dropped. "Ferrite" and "Strata" remain internal names of the design directions only. | owner |
+| 2026-11-08 | Direction: hybrid Strata + Ferrite — **superseded** the same day | owner |
+| 2026-11-08 | Name: **keep the original name** — RustBackup (display) / `rust-backup` (repository). No rename, no data-folder migration, no trademark check; lot J3.5 is dropped. "Ferrite", "Strata" and "Arche" remain internal names of the design directions only. | owner |
+| 2026-11-08 | Direction: **100 % C · Arche** (single theme family, light + dark), replacing the hybrid. Multi-theme option (Strata/Ferrite/Arche skins) discussed and not retained. | owner |
 
-### Chosen hybrid — working definition for J3.3
 
-The split follows the Fluent two-layer model (research §1): Strata owns the **base layer**, Ferrite owns the
-**content layer**.
+### Chosen direction — Arche for RustBackup (working definition for J3.3)
 
-| Aspect | Taken from | Rule |
-|---|---|---|
-| Window, title bar, navigation | Strata | Mica backdrop (opaque fallback per theme), Fluent radii 8/4 px, nav rows like Windows Settings |
-| Body text, controls | Strata | Segoe UI Variable, Windows 11 type ramp, sentence case |
-| Icons | Strata | Fluent System Icons, regular at rest, filled when active |
-| Accent and primary action | Ferrite | Oxide (`#E8703A` dark, `#B4441C` light) replaces Strata's lapis; magnetite `#7F95A8` / `#4A6175` as data series 2 |
-| Numbers and technical labels | Ferrite | JetBrains Mono (embedded) for sizes, counts, hashes, timestamps; tabular figures |
-| Time visual | Ferrite | 30-day tape track on the dashboard (full / incremental / failure / today) |
-| Snapshot detail | Strata | Strata chart (new data per snapshot) stays on job detail / restore pages |
-| Hero | Strata structure, Ferrite tone | Hero card with status sentence + 2 actions + illustration; Big Shoulders Display is **dropped** to stay native (open question for J3.3: keep it for the wordmark only) |
-| Neutrals | Ferrite, warmed toward Mica | Dark: graphite family (`#0F1012`…`#2A2D32`) as Mica fallback/content; light: concrete `#E9E8E4` fallback, `#F6F5F2` content |
-| Illustrations | Mixed, to settle in J3.4 | Isometric objects (Ferrite) with the sediment ramp as secondary colors (Strata) |
-| Mark | To redraw in J3.3 | New RustBackup mark replacing the current shield. Rust *is* iron oxide, so the oxide palette now ties directly to the name. Candidates: the Strata core sample with oxide/magnetite layers, or the Ferrite toroid |
-| Semantics | Strata (Fluent status) | Success/caution/critical tokens distinct from oxide; check that warning amber stays distinguishable from the oxide accent |
+Everything in section "C · Arche" above applies, with these adjustments for the kept name and the platform:
 
-Open items before J3.3 ends: final mark, whether the condensed display face survives anywhere (e.g. the wordmark).
+| Aspect | Rule |
+|---|---|
+| Name and wordmark | "RustBackup" set in Newsreader (display optical size), sentence case; the product is **not** called Arche. |
+| Mark | Redraw the arch mark for RustBackup in J3.3: arch + ground line + hull, hull in brass. Brass/bronze also nods to "rust" (metal patina) without using the rust-orange of Ferrite. Two stroke weights: fine for >= 32 px, heavy for 16-24 px and the `.ico`. Replaces the current teal shield. |
+| Window backdrop | **Opaque** limestone (light) / night (dark) base. Mica is not part of Arche; plan lot 4.1 keeps `MicaBackdrop` only if a later review shows it does not muddy the limestone. |
+| Type | Newsreader for hero sentence, page titles and wordmark only (>= 20 px); Segoe UI Variable for all UI text; tabular figures for sizes and counts. Embed Newsreader (OFL) via `add_fonts`. |
+| Color | Palette exactly as in the Arche table; primary button = ink fill; brass for eyebrow, emphasis, active-nav underline only (4.7:1, short text only); semantic colors separate from brass. |
+| Geometry | Fluent radii kept (8 px window/dialog, 4-6 px controls); hairline rules instead of card borders where possible. |
+| Icons | Lucide subset via `icon_assets!`, 1.25-1.5 stroke, round caps, 20 px minimum. |
+| Dashboard | Eyebrow date -> serif status sentence -> one-line summary -> primary/secondary action -> 30-day dot calendar -> ledger list of jobs. |
+| Copy tone | Calm, human: "Retrouver un fichier", "Registre", "Tout est à l'abri depuis 22 h 14." (FR) with matching EN. Final labels decided page by page in J4. |
+| Illustrations (J3.4) | Etching-style line art, one ink + brass wash, light and dark variants. Highest production risk: plan vector clean-up (or SVG tracing) after generation, fixed seeds, a strict prompt kit. |
+
+Open items for J3.3: final mark geometry and `.ico` sizes, exact dark-mode brass legibility check, whether
+Mica is used at all.

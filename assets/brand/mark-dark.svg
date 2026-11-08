@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- RustBackup mark (Arche direction): a round arch on a ground line sheltering a brass hull -->
+  <g fill="none" stroke="#ECEAE2" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M17 50 V30 A15 15 0 0 1 47 30 V50"/>
+    <path d="M8 50 H56"/>
+  </g>
+  <path d="M23 38.5 H41 L37.5 45 H26.5 Z" fill="#D2B577" stroke="#D2B577" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>

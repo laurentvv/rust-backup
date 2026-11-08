@@ -395,6 +395,40 @@ impl Repository {
             .find(|m| &m.job_id == job_id))
     }
 
+    /// All manifests for a given job, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Propagates manifest read errors.
+    pub fn manifests_for_job(&self, job_id: &uuid::Uuid) -> crate::Result<Vec<SnapshotManifest>> {
+        Ok(self
+            .all_manifests()?
+            .into_iter()
+            .filter(|m| &m.job_id == job_id)
+            .collect())
+    }
+
+    /// Counts how many consecutive incremental snapshots exist since the latest
+    /// full snapshot for this job.
+    ///
+    /// # Errors
+    ///
+    /// Propagates manifest read errors.
+    pub fn count_consecutive_incrementals_for_job(
+        &self,
+        job_id: &uuid::Uuid,
+    ) -> crate::Result<u32> {
+        let manifests = self.manifests_for_job(job_id)?;
+        let mut count = 0;
+        for m in manifests {
+            if m.kind == crate::domain::BackupKind::Full {
+                break;
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Acquires an exclusive write lock on the repository.
     ///
     /// # Errors

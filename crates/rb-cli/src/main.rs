@@ -51,6 +51,9 @@ enum Command {
         /// Job name or id.
         #[arg(long)]
         job: String,
+        /// Force a full backup (re-chunks and re-hashes all files).
+        #[arg(long)]
+        full: bool,
     },
     /// List snapshots of a job.
     Snapshots {
@@ -132,41 +135,47 @@ enum RepoAction {
     },
 }
 
+#[derive(clap::Args)]
+struct JobAddArgs {
+    /// Display name of the job.
+    #[arg(long)]
+    name: String,
+    /// Source directory (repeat the flag for several sources).
+    #[arg(long = "source", required = true)]
+    sources: Vec<PathBuf>,
+    /// Repository root folder on the local filesystem.
+    #[arg(long, required_unless_present = "sftp_host")]
+    local_root: Option<PathBuf>,
+    /// zstd compression level 0..=22 (default 5).
+    #[arg(long, default_value_t = 5)]
+    compression: i32,
+    /// SFTP server host (switches the destination to SFTP).
+    #[arg(long)]
+    sftp_host: Option<String>,
+    /// SFTP port (default 22).
+    #[arg(long, default_value_t = 22)]
+    sftp_port: u16,
+    /// SFTP user name.
+    #[arg(long)]
+    sftp_user: Option<String>,
+    /// Private key file for SFTP.
+    #[arg(long)]
+    sftp_key: Option<PathBuf>,
+    /// Repository root on the SFTP server.
+    #[arg(long)]
+    sftp_root: Option<String>,
+    /// File/directory name or wildcard pattern to exclude (repeatable).
+    #[arg(long = "exclude")]
+    excludes: Vec<String>,
+    /// Number of incremental backups before forcing 1 full backup (0 = disabled).
+    #[arg(long, default_value_t = 10)]
+    max_incrementals: u32,
+}
+
 #[derive(Subcommand)]
 enum JobsAction {
     /// Create a backup job writing to a local destination (USB disk, ...).
-    Add {
-        /// Display name of the job.
-        #[arg(long)]
-        name: String,
-        /// Source directory (repeat the flag for several sources).
-        #[arg(long = "source", required = true)]
-        sources: Vec<PathBuf>,
-        /// Repository root folder on the local filesystem.
-        #[arg(long, required_unless_present = "sftp_host")]
-        local_root: Option<PathBuf>,
-        /// zstd compression level 0..=22 (default 5).
-        #[arg(long, default_value_t = 5)]
-        compression: i32,
-        /// SFTP server host (switches the destination to SFTP).
-        #[arg(long)]
-        sftp_host: Option<String>,
-        /// SFTP port (default 22).
-        #[arg(long, default_value_t = 22)]
-        sftp_port: u16,
-        /// SFTP user name.
-        #[arg(long)]
-        sftp_user: Option<String>,
-        /// Private key file for SFTP.
-        #[arg(long)]
-        sftp_key: Option<PathBuf>,
-        /// Repository root on the SFTP server.
-        #[arg(long)]
-        sftp_root: Option<String>,
-        /// File/directory name or wildcard pattern to exclude (repeatable).
-        #[arg(long = "exclude")]
-        excludes: Vec<String>,
-    },
+    Add(Box<JobAddArgs>),
     /// List configured jobs.
     List,
     /// Remove a job by id (run history is kept).
@@ -201,18 +210,20 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Command::Jobs { action } => match action {
-            JobsAction::Add {
-                name,
-                sources,
-                local_root,
-                compression,
-                sftp_host,
-                sftp_port,
-                sftp_user,
-                sftp_key,
-                sftp_root,
-                excludes,
-            } => {
+            JobsAction::Add(args) => {
+                let JobAddArgs {
+                    name,
+                    sources,
+                    local_root,
+                    compression,
+                    sftp_host,
+                    sftp_port,
+                    sftp_user,
+                    sftp_key,
+                    sftp_root,
+                    excludes,
+                    max_incrementals,
+                } = *args;
                 let catalog = Catalog::open(&db_path)?;
                 let destination = build_destination(
                     local_root, sftp_host, sftp_port, sftp_user, sftp_key, sftp_root,
@@ -224,11 +235,15 @@ fn main() -> anyhow::Result<()> {
                     destination,
                     compression_level: compression,
                     excludes,
+                    max_incrementals,
                     created_at: chrono_now(),
                 };
                 job.validate().map_err(|e| anyhow::anyhow!(e))?;
                 catalog.insert_job(&job)?;
-                println!("job created: {} ({})", job.name, job.id);
+                println!(
+                    "job created: {} ({}) [full every {} inc]",
+                    job.name, job.id, job.max_incrementals
+                );
             }
             JobsAction::List => {
                 let catalog = Catalog::open(&db_path)?;
@@ -239,12 +254,13 @@ fn main() -> anyhow::Result<()> {
                 }
                 for job in jobs {
                     println!(
-                        "{}\t{}\t{}\t{} source(s)\tzstd-{}",
+                        "{}\t{}\t{}\t{} source(s)\tzstd-{}\tfull every {} inc",
                         job.id,
                         job.name,
                         job.destination.describe(),
                         job.sources.len(),
-                        job.compression_level
+                        job.compression_level,
+                        job.max_incrementals
                     );
                 }
             }
@@ -286,14 +302,20 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         },
-        Command::Backup { job } => {
+        Command::Backup { job, full } => {
             let catalog = Catalog::open(&db_path)?;
             let config = find_job(&catalog, &job)?;
             let passphrase = read_passphrase()?;
-            let run = run_job(&catalog, &config, &passphrase)?;
+            let force_kind = if full {
+                Some(rb_core::domain::BackupKind::Full)
+            } else {
+                None
+            };
+            let run = run_job(&catalog, &config, &passphrase, force_kind)?;
             println!(
-                "snapshot {} finalized: {} files, {} bytes, {} new chunks ({} bytes), {} skipped",
+                "snapshot {} ({}) finalized: {} files, {} bytes, {} new chunks ({} bytes), {} skipped",
                 run.0,
+                run.1.kind.as_str(),
                 run.1.files_total,
                 run.1.bytes_total,
                 run.1.chunks_new,
@@ -311,9 +333,10 @@ fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 println!(
-                    "{}\t{}\t{} files\t{} bytes\t{} skipped",
+                    "{}\t{}\t[{}]\t{} files\t{} bytes\t{} skipped",
                     manifest.id,
                     manifest.created_at.to_rfc3339(),
+                    manifest.kind.as_str(),
                     manifest.file_count(),
                     manifest.total_bytes(),
                     manifest.skipped.len()
@@ -551,6 +574,7 @@ fn run_job(
     catalog: &Catalog,
     config: &JobConfig,
     passphrase: &str,
+    force_kind: Option<rb_core::domain::BackupKind>,
 ) -> anyhow::Result<(Uuid, rb_core::backup::BackupStats)> {
     let repo = open_repo(config, passphrase, false)?;
     let started = chrono_now();
@@ -559,7 +583,10 @@ fn run_job(
     let result = rb_core::backup::run_backup(
         &repo,
         config,
-        &rb_core::backup::BackupOptions::default(),
+        &rb_core::backup::BackupOptions {
+            cancel: None,
+            force_kind,
+        },
         |event| {
             match event {
                 rb_core::backup::BackupEvent::FileDone { .. } => files_done += 1,
@@ -585,6 +612,7 @@ fn run_job(
                 bytes_total: 0,
                 chunks_new: 0,
                 bytes_new: 0,
+                kind: force_kind.unwrap_or(rb_core::domain::BackupKind::Incremental),
                 error: Some(e.to_string()),
             };
             catalog.insert_run(&record)?;
@@ -602,6 +630,7 @@ fn run_job(
         bytes_total: stats.bytes_total,
         chunks_new: stats.chunks_new,
         bytes_new: stats.bytes_new,
+        kind: stats.kind,
         error: None,
     };
     catalog.insert_run(&record)?;
@@ -611,6 +640,7 @@ fn run_job(
         record.finished_at,
         stats.files_total,
         stats.bytes_total,
+        stats.kind,
     )?;
     let _ = files_done;
     Ok((snapshot_id, stats))

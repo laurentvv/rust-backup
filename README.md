@@ -36,8 +36,8 @@ Whether backing up directly to external USB drives, local NVMe volumes, or offsi
 
 ## ✨ Key Features
 
-- **Full Backup, Then Incremental Forever**  
-  Content-defined chunking with **FastCDC v2020** (256 KiB / 1 MiB / 4 MiB) combined with **BLAKE3** content addressing. A second run against an unchanged directory stores **zero new bytes** in fractions of a second.
+- **Full Backup, Then Incremental Forever & Configurable Full Cadence**  
+  Content-defined chunking with **FastCDC v2020** (256 KiB / 1 MiB / 4 MiB) combined with **BLAKE3** content addressing. A second run against an unchanged directory stores **zero new bytes** in fractions of a second. Automatically schedules a Full backup after $X$ incremental backups (default: 10, configurable per job or set to 0 to disable), or force a Full backup on demand at any time (`--full` or GUI toggle).
 - **Encrypt-Then-Store AEAD Cryptography**  
   Each chunk is compressed with **zstd**, then sealed using **AES-256-GCM** with a fresh 96-bit random nonce. Associated data strictly binds `BLAKE3(plaintext) || plain_len` to prevent chunk-swapping or truncation attacks. The 256-bit master key is encrypted via **Argon2id** (64 MiB, $t=3$, $p=4$) and zeroized in memory on drop.
 - **Self-Contained Repository Format (v1)**  
@@ -153,11 +153,13 @@ rbackup repo init --dest E:\Backups\vault
 # Or on a remote Linux server:
 # rbackup repo init --sftp-host 192.168.1.100 --sftp-user backup --sftp-key ~/.ssh/id_ed25519 --sftp-root /srv/backup
 
-# 2. Configure a backup job
-rbackup jobs add --name work-docs --source C:\Users\Laurent\Documents --local-root E:\Backups\vault
+# 2. Configure a backup job (optional --max-incrementals, default 10, 0 to disable)
+rbackup jobs add --name work-docs --source C:\Users\Laurent\Documents --local-root E:\Backups\vault --max-incrementals 10
 
-# 3. Run a backup
+# 3. Run a backup (auto-incremental or auto-full by cadence, or force full with --full)
 rbackup backup --job work-docs
+# Or force a full scan:
+# rbackup backup --job work-docs --full
 
 # 4. List snapshots
 rbackup snapshots --job work-docs

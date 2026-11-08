@@ -33,12 +33,14 @@ pub struct BackupSummary {
 pub fn spawn_backup(
     job: JobConfig,
     passphrase: String,
+    force_kind: Option<rb_core::domain::BackupKind>,
 ) -> (Receiver<EngineEvent>, Arc<AtomicBool>) {
     let (tx, rx) = flume::unbounded();
     let cancel = Arc::new(AtomicBool::new(false));
     let runner = BackupRunner {
         tx,
         cancel: Arc::clone(&cancel),
+        force_kind,
     };
     std::thread::spawn(move || runner.execute(job, passphrase));
     (rx, cancel)
@@ -47,6 +49,7 @@ pub fn spawn_backup(
 struct BackupRunner {
     tx: Sender<EngineEvent>,
     cancel: Arc<AtomicBool>,
+    force_kind: Option<rb_core::domain::BackupKind>,
 }
 
 impl BackupRunner {
@@ -72,6 +75,7 @@ impl BackupRunner {
                     bytes_total: summary.1.bytes_total,
                     chunks_new: summary.1.chunks_new,
                     bytes_new: summary.1.bytes_new,
+                    kind: summary.1.kind,
                     error: None,
                 },
                 Err(message) => rb_core::domain::RunRecord {
@@ -84,6 +88,9 @@ impl BackupRunner {
                     bytes_total: 0,
                     chunks_new: 0,
                     bytes_new: 0,
+                    kind: self
+                        .force_kind
+                        .unwrap_or(rb_core::domain::BackupKind::Incremental),
                     error: Some(message.clone()),
                 },
             };
@@ -96,6 +103,7 @@ impl BackupRunner {
                     finished,
                     summary.1.files_total,
                     summary.1.bytes_total,
+                    summary.1.kind,
                 );
             }
         }
@@ -133,6 +141,7 @@ impl BackupRunner {
             job,
             &BackupOptions {
                 cancel: Some(Arc::clone(&self.cancel)),
+                force_kind: self.force_kind,
             },
             move |event| {
                 // The engine is cancelled by dropping interest too.
@@ -220,6 +229,8 @@ pub struct SnapshotRow {
     pub files: usize,
     /// Entries: (source root, relative path, size in bytes).
     pub entries: Vec<(String, String, u64)>,
+    /// Kind of backup (full or incremental).
+    pub kind: rb_core::domain::BackupKind,
 }
 
 /// Loads the snapshots of a job's repository on a background thread.
@@ -253,6 +264,7 @@ pub fn spawn_snapshots(
                     created_at: manifest.created_at.to_rfc3339(),
                     files: manifest.file_count(),
                     entries,
+                    kind: manifest.kind,
                 });
             }
             Ok(rows)

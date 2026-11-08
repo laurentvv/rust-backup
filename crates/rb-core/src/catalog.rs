@@ -66,6 +66,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS excludes_json VARCHAR DEFAULT '[]';
     "#,
     ),
+    (
+        "0004_full_cadence",
+        r#"
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_incrementals UINTEGER DEFAULT 10;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS kind VARCHAR DEFAULT 'incremental';
+    ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS kind VARCHAR DEFAULT 'incremental';
+    "#,
+    ),
 ];
 
 /// Cached snapshot row for fast browsing (local catalog only; the
@@ -80,6 +88,8 @@ pub struct SnapshotSummary {
     pub files_total: u64,
     /// Bytes captured.
     pub bytes_total: u64,
+    /// Kind of backup (full or incremental).
+    pub kind: crate::domain::BackupKind,
 }
 
 /// Handle to the local catalog database. Opening migrates the schema to the
@@ -168,8 +178,8 @@ impl Catalog {
         let destination = serde_json::to_string(&job.destination)?;
         let excludes = serde_json::to_string(&job.excludes)?;
         self.conn.execute(
-            "INSERT INTO jobs (id, name, sources_json, destination_json, compression_level, created_at, excludes_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO jobs (id, name, sources_json, destination_json, compression_level, created_at, excludes_json, max_incrementals)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             duckdb::params![
                 job.id.to_string(),
                 job.name,
@@ -178,6 +188,7 @@ impl Catalog {
                 job.compression_level,
                 job.created_at.to_rfc3339(),
                 excludes,
+                job.max_incrementals,
             ],
         )?;
         Ok(())
@@ -195,7 +206,7 @@ impl Catalog {
         let destination = serde_json::to_string(&job.destination)?;
         let excludes = serde_json::to_string(&job.excludes)?;
         let updated = self.conn.execute(
-            "UPDATE jobs SET name = ?, sources_json = ?, destination_json = ?, compression_level = ?, excludes_json = ?
+            "UPDATE jobs SET name = ?, sources_json = ?, destination_json = ?, compression_level = ?, excludes_json = ?, max_incrementals = ?
              WHERE id = ?",
             duckdb::params![
                 job.name,
@@ -203,6 +214,7 @@ impl Catalog {
                 destination,
                 job.compression_level,
                 excludes,
+                job.max_incrementals,
                 job.id.to_string(),
             ],
         )?;
@@ -218,7 +230,7 @@ impl Catalog {
     pub fn list_jobs(&self) -> crate::Result<Vec<JobConfig>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, sources_json, destination_json, compression_level, created_at, COALESCE(excludes_json, '[]') FROM jobs ORDER BY name")?;
+            .prepare("SELECT id, name, sources_json, destination_json, compression_level, created_at, COALESCE(excludes_json, '[]'), COALESCE(max_incrementals, 10) FROM jobs ORDER BY name")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -228,11 +240,12 @@ impl Catalog {
                 row.get::<_, i32>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
+                row.get::<_, u32>(7)?,
             ))
         })?;
         let mut jobs = Vec::new();
         for row in rows {
-            let (id, name, sources_json, dest_json, level, created, excludes_json) = row?;
+            let (id, name, sources_json, dest_json, level, created, excludes_json, max_inc) = row?;
             jobs.push(JobConfig {
                 id: Uuid::parse_str(&id).map_err(|e| {
                     crate::Error::InvalidJob(format!("stored job id not a uuid: {e}"))
@@ -242,6 +255,7 @@ impl Catalog {
                 destination: serde_json::from_str(&dest_json)?,
                 compression_level: level,
                 excludes: serde_json::from_str(&excludes_json).unwrap_or_default(),
+                max_incrementals: max_inc,
                 created_at: DateTime::parse_from_rfc3339(&created)
                     .map_err(|e| {
                         crate::Error::InvalidJob(format!("stored created_at invalid: {e}"))
@@ -271,8 +285,8 @@ impl Catalog {
     /// Returns [`Error::Catalog`] on database errors.
     pub fn insert_run(&self, run: &crate::domain::RunRecord) -> crate::Result<()> {
         self.conn.execute(
-            "INSERT INTO runs (id, job_id, started_at, finished_at, status, files_total, bytes_total, chunks_new, bytes_new, error)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs (id, job_id, started_at, finished_at, status, files_total, bytes_total, chunks_new, bytes_new, error, kind)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             duckdb::params![
                 run.id.to_string(),
                 run.job_id.to_string(),
@@ -284,6 +298,7 @@ impl Catalog {
                 run.chunks_new as i64,
                 run.bytes_new as i64,
                 run.error,
+                run.kind.as_str(),
             ],
         )?;
         Ok(())
@@ -297,7 +312,7 @@ impl Catalog {
     /// [`Error::InvalidJob`] when a stored row cannot be decoded.
     pub fn list_runs(&self, job_id: JobId) -> crate::Result<Vec<crate::domain::RunRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, job_id, started_at, finished_at, status, files_total, bytes_total, chunks_new, bytes_new, error
+            "SELECT id, job_id, started_at, finished_at, status, files_total, bytes_total, chunks_new, bytes_new, error, COALESCE(kind, 'incremental')
              FROM runs WHERE job_id = ? ORDER BY started_at DESC",
         )?;
         let rows = stmt.query_map([job_id.to_string()], |row| {
@@ -312,11 +327,24 @@ impl Catalog {
                 row.get::<_, i64>(7)?,
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<String>>(9)?,
+                row.get::<_, String>(10)?,
             ))
         })?;
         let mut runs = Vec::new();
         for row in rows {
-            let (id, job, started, finished, status, files, bytes, chunks, new_bytes, error) = row?;
+            let (
+                id,
+                job,
+                started,
+                finished,
+                status,
+                files,
+                bytes,
+                chunks,
+                new_bytes,
+                error,
+                kind_str,
+            ) = row?;
             let parse_ts = |v: &str| -> crate::Result<DateTime<Utc>> {
                 DateTime::parse_from_rfc3339(v)
                     .map(|t| t.with_timezone(&Utc))
@@ -334,6 +362,8 @@ impl Catalog {
                 bytes_total: bytes.unsigned_abs(),
                 chunks_new: chunks.unsigned_abs(),
                 bytes_new: new_bytes.unsigned_abs(),
+                kind: crate::domain::BackupKind::parse(&kind_str)
+                    .unwrap_or(crate::domain::BackupKind::Incremental),
                 error,
             });
         }
@@ -352,15 +382,17 @@ impl Catalog {
         created_at: DateTime<Utc>,
         files_total: u64,
         bytes_total: u64,
+        kind: crate::domain::BackupKind,
     ) -> crate::Result<()> {
         self.conn.execute(
-            "INSERT INTO snapshots (id, job_id, created_at, files_total, bytes_total) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO snapshots (id, job_id, created_at, files_total, bytes_total, kind) VALUES (?, ?, ?, ?, ?, ?)",
             duckdb::params![
                 snapshot_id.to_string(),
                 job_id.to_string(),
                 created_at.to_rfc3339(),
                 files_total as i64,
                 bytes_total as i64,
+                kind.as_str(),
             ],
         )?;
         Ok(())
@@ -386,7 +418,7 @@ impl Catalog {
     /// Returns [`Error::Catalog`] on database errors.
     pub fn list_snapshots(&self, job_id: JobId) -> crate::Result<Vec<SnapshotSummary>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, files_total, bytes_total FROM snapshots
+            "SELECT id, created_at, files_total, bytes_total, COALESCE(kind, 'incremental') FROM snapshots
              WHERE job_id = ? ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([job_id.to_string()], |row| {
@@ -395,11 +427,12 @@ impl Catalog {
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, created, files, bytes) = row?;
+            let (id, created, files, bytes, kind_str) = row?;
             let created_at = DateTime::parse_from_rfc3339(&created)
                 .map(|t| t.with_timezone(&Utc))
                 .map_err(|e| crate::Error::InvalidJob(format!("stored timestamp invalid: {e}")))?;
@@ -411,9 +444,32 @@ impl Catalog {
                 created_at,
                 files_total: files.unsigned_abs(),
                 bytes_total: bytes.unsigned_abs(),
+                kind: crate::domain::BackupKind::parse(&kind_str)
+                    .unwrap_or(crate::domain::BackupKind::Incremental),
             });
         }
         Ok(out)
+    }
+
+    /// Returns the number of consecutive successful incremental runs for `job_id`
+    /// recorded in the catalog since the latest full run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Catalog`] on database errors.
+    pub fn incrementals_since_last_full(&self, job_id: &JobId) -> crate::Result<u32> {
+        let runs = self.list_runs(*job_id)?;
+        let mut count = 0;
+        for r in runs {
+            if r.status != crate::domain::RunStatus::Success {
+                continue;
+            }
+            if r.kind == crate::domain::BackupKind::Full {
+                break;
+            }
+            count += 1;
+        }
+        Ok(count)
     }
 
     /// Records a verification result.
@@ -507,6 +563,7 @@ mod tests {
             },
             compression_level: 5,
             excludes: vec!["target".into(), "*.tmp".into()],
+            max_incrementals: 10,
             created_at: Utc::now(),
         }
     }
@@ -525,6 +582,7 @@ mod tests {
         assert_eq!(listed[0].destination, job.destination);
         assert_eq!(listed[0].compression_level, 5);
         assert_eq!(listed[0].excludes, vec!["target", "*.tmp"]);
+        assert_eq!(listed[0].max_incrementals, 10);
     }
 
     #[test]
@@ -536,6 +594,7 @@ mod tests {
         job.name = "photos-edited".into();
         job.compression_level = 9;
         job.excludes = vec!["*.raw".into()];
+        job.max_incrementals = 5;
         assert!(catalog.update_job(&job).expect("update job"));
 
         let listed = catalog.list_jobs().expect("list jobs");
@@ -543,6 +602,7 @@ mod tests {
         assert_eq!(listed[0].name, "photos-edited");
         assert_eq!(listed[0].compression_level, 9);
         assert_eq!(listed[0].excludes, vec!["*.raw".to_string()]);
+        assert_eq!(listed[0].max_incrementals, 5);
     }
 
     #[test]
@@ -608,6 +668,7 @@ mod tests {
                 bytes_total: 1000 * (i as u64 + 1),
                 chunks_new: 3 + i as u64,
                 bytes_new: 300 * (i as u64 + 1),
+                kind: crate::domain::BackupKind::Incremental,
                 error: (status == RunStatus::Failed).then(|| "boom".into()),
             };
             catalog.insert_run(&record).expect("insert run");
@@ -617,6 +678,7 @@ mod tests {
         assert_eq!(runs.len(), 3);
         assert!(runs[0].started_at > runs[1].started_at, "newest first");
         assert_eq!(runs[0].files_total, 12);
+        assert_eq!(runs[0].kind, crate::domain::BackupKind::Incremental);
         assert_eq!(
             runs.iter()
                 .filter(|r| r.status == RunStatus::Failed)
@@ -633,19 +695,35 @@ mod tests {
         catalog.insert_job(&job).expect("insert job");
 
         catalog
-            .insert_snapshot(Uuid::new_v4(), job.id, Utc::now(), 12, 34_000)
+            .insert_snapshot(
+                Uuid::new_v4(),
+                job.id,
+                Utc::now(),
+                12,
+                34_000,
+                crate::domain::BackupKind::Full,
+            )
             .expect("snapshot 1");
         std::thread::sleep(std::time::Duration::from_millis(20));
         let second = Uuid::new_v4();
         catalog
-            .insert_snapshot(second, job.id, Utc::now(), 15, 40_000)
+            .insert_snapshot(
+                second,
+                job.id,
+                Utc::now(),
+                15,
+                40_000,
+                crate::domain::BackupKind::Incremental,
+            )
             .expect("snapshot 2");
 
         let snapshots = catalog.list_snapshots(job.id).expect("list snapshots");
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].id, second, "newest first");
         assert_eq!(snapshots[0].files_total, 15);
+        assert_eq!(snapshots[0].kind, crate::domain::BackupKind::Incremental);
         assert_eq!(snapshots[1].bytes_total, 34_000);
+        assert_eq!(snapshots[1].kind, crate::domain::BackupKind::Full);
 
         assert!(catalog.delete_snapshot(second).expect("delete snapshot"));
         let remaining = catalog.list_snapshots(job.id).expect("list snapshots");
@@ -677,5 +755,64 @@ mod tests {
         assert_eq!(outcomes[0].mode, crate::verify::VerifyMode::Full);
         assert_eq!(outcomes[0].chunks_checked, 9);
         assert_eq!(outcomes[0].issues, vec!["chunk abc is MISSING".to_string()]);
+    }
+
+    #[test]
+    fn incrementals_since_last_full_should_count_consecutive_successes() {
+        use crate::domain::{BackupKind, RunRecord, RunStatus};
+        let catalog = Catalog::open_in_memory().expect("catalog");
+        let job = sample_job("cadence-test");
+        catalog.insert_job(&job).expect("insert job");
+
+        assert_eq!(
+            catalog
+                .incrementals_since_last_full(&job.id)
+                .expect("initial count"),
+            0
+        );
+
+        let make_run = |kind: BackupKind, status: RunStatus, age_mins: i64| RunRecord {
+            id: Uuid::new_v4(),
+            job_id: job.id,
+            started_at: Utc::now() - chrono::Duration::minutes(age_mins + 1),
+            finished_at: Utc::now() - chrono::Duration::minutes(age_mins),
+            status,
+            files_total: 10,
+            bytes_total: 1000,
+            chunks_new: 2,
+            bytes_new: 200,
+            kind,
+            error: None,
+        };
+
+        // 1. Initial full run 30 mins ago
+        catalog
+            .insert_run(&make_run(BackupKind::Full, RunStatus::Success, 30))
+            .expect("run 1");
+        assert_eq!(catalog.incrementals_since_last_full(&job.id).unwrap(), 0);
+
+        // 2. Incremental run 20 mins ago
+        catalog
+            .insert_run(&make_run(BackupKind::Incremental, RunStatus::Success, 20))
+            .expect("run 2");
+        assert_eq!(catalog.incrementals_since_last_full(&job.id).unwrap(), 1);
+
+        // 3. Failed run (should not reset or increment successful count)
+        catalog
+            .insert_run(&make_run(BackupKind::Incremental, RunStatus::Failed, 15))
+            .expect("run failed");
+        assert_eq!(catalog.incrementals_since_last_full(&job.id).unwrap(), 1);
+
+        // 4. Second successful incremental run 10 mins ago
+        catalog
+            .insert_run(&make_run(BackupKind::Incremental, RunStatus::Success, 10))
+            .expect("run 3");
+        assert_eq!(catalog.incrementals_since_last_full(&job.id).unwrap(), 2);
+
+        // 5. Full run 5 mins ago (resets counter to 0)
+        catalog
+            .insert_run(&make_run(BackupKind::Full, RunStatus::Success, 5))
+            .expect("run full");
+        assert_eq!(catalog.incrementals_since_last_full(&job.id).unwrap(), 0);
     }
 }

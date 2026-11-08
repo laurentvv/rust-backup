@@ -114,9 +114,11 @@ pub struct RustBackupApp {
     form_sftp_key: gpui::Entity<InputState>,
     form_sftp_root: gpui::Entity<InputState>,
     form_excludes: gpui::Entity<InputState>,
+    form_max_incrementals: gpui::Entity<InputState>,
     form_compression: i32,
     editing_job_id: Option<JobId>,
     form_passphrase: gpui::Entity<InputState>,
+    force_full: bool,
 
     phase: RunPhase,
     run_files_done: u64,
@@ -273,6 +275,11 @@ impl RustBackupApp {
             form_excludes: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("target, node_modules, .git, *.tmp")
             }),
+            form_max_incrementals: cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("10");
+                state.set_value("10", window, cx);
+                state
+            }),
             form_compression: 5,
             editing_job_id: None,
             form_passphrase: cx.new(|cx| {
@@ -280,6 +287,7 @@ impl RustBackupApp {
                     .placeholder("••••••••••")
                     .masked(true)
             }),
+            force_full: false,
             phase: RunPhase::Idle,
             run_files_done: 0,
             run_bytes_done: 0,
@@ -411,7 +419,12 @@ impl RustBackupApp {
             return;
         }
 
-        let (rx, cancel) = runner::spawn_backup(job, passphrase);
+        let force_kind = if self.force_full {
+            Some(rb_core::domain::BackupKind::Full)
+        } else {
+            None
+        };
+        let (rx, cancel) = runner::spawn_backup(job, passphrase, force_kind);
         self.phase = RunPhase::Running {
             job: self
                 .jobs
@@ -885,6 +898,13 @@ impl RustBackupApp {
 
         let is_editing = self.editing_job_id.is_some();
         let job_id = self.editing_job_id.unwrap_or_else(Uuid::new_v4);
+        let max_incrementals = self
+            .form_max_incrementals
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(10);
         let job = JobConfig {
             id: job_id,
             name: name.clone(),
@@ -892,6 +912,7 @@ impl RustBackupApp {
             destination,
             compression_level: self.form_compression,
             excludes,
+            max_incrementals,
             created_at: chrono::Utc::now(),
         };
 
@@ -961,6 +982,8 @@ impl RustBackupApp {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.form_excludes
             .update(cx, |input, cx| input.set_value("", window, cx));
+        self.form_max_incrementals
+            .update(cx, |input, cx| input.set_value("10", window, cx));
         self.form_compression = 5;
     }
 
@@ -987,6 +1010,9 @@ impl RustBackupApp {
         self.form_compression = job.compression_level;
         self.form_excludes.update(cx, |input, cx| {
             input.set_value(job.excludes.join(", "), window, cx);
+        });
+        self.form_max_incrementals.update(cx, |input, cx| {
+            input.set_value(job.max_incrementals.to_string(), window, cx);
         });
 
         match &job.destination {
@@ -1484,6 +1510,23 @@ impl RustBackupApp {
                                                 .text_size(px(10.0))
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(format!("zstd-{}", job.compression_level)),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_md()
+                                                .bg(cx.theme().selection.opacity(0.5))
+                                                .text_size(px(10.0))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(if job.max_incrementals == 0 {
+                                                    format!("{}: off", t.cadence_badge)
+                                                } else {
+                                                    format!(
+                                                        "{}: {} inc",
+                                                        t.cadence_badge, job.max_incrementals
+                                                    )
+                                                }),
                                         ),
                                 )
                                 .child(
@@ -1864,6 +1907,7 @@ impl RustBackupApp {
                         )
                         .child(Input::new(&self.form_excludes)),
                 )
+                .child(self.labeled_input(t.max_incrementals, &self.form_max_incrementals))
                 .child(
                     v_flex()
                         .gap_1()
@@ -2153,6 +2197,37 @@ impl RustBackupApp {
                         ),
                 )
             })
+            .when(!running, |this| {
+                this.child(
+                    h_flex()
+                        .gap_4()
+                        .items_center()
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().background)
+                        .child(
+                            Switch::new("force-full-toggle")
+                                .checked(self.force_full)
+                                .label(t.force_full)
+                                .on_change(cx.listener(|this, checked, _, cx| {
+                                    this.force_full = *checked;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if self.force_full {
+                                    format!("{} ({})", t.mode_full, t.force_full)
+                                } else {
+                                    t.mode_incremental.to_string()
+                                }),
+                        ),
+                )
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2409,6 +2484,26 @@ impl RustBackupApp {
                                     .text_size(px(12.0))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(row.created_at.clone()),
+                            )
+                            .child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .text_size(px(10.0))
+                                    .when(row.kind == rb_core::domain::BackupKind::Full, |this| {
+                                        this.bg(cx.theme().primary.opacity(0.15))
+                                            .text_color(cx.theme().primary)
+                                    })
+                                    .when(row.kind != rb_core::domain::BackupKind::Full, |this| {
+                                        this.bg(cx.theme().selection.opacity(0.5))
+                                            .text_color(cx.theme().muted_foreground)
+                                    })
+                                    .child(if row.kind == rb_core::domain::BackupKind::Full {
+                                        t.mode_full
+                                    } else {
+                                        t.mode_incremental
+                                    }),
                             )
                             .child(
                                 div()
@@ -2983,11 +3078,12 @@ impl RustBackupApp {
                     .p_2()
                     .text_size(px(12.0))
                     .text_color(cx.theme().muted_foreground)
-                    .child(div().w(px(180.0)).child(t.jobs.to_string()))
-                    .child(div().w(px(90.0)).child(t.status))
+                    .child(div().w(px(160.0)).child(t.jobs.to_string()))
+                    .child(div().w(px(80.0)).child(t.status))
+                    .child(div().w(px(90.0)).child(t.cadence_badge))
                     .child(div().flex_1().child("UTC"))
-                    .child(div().w(px(110.0)).child(t.files_done))
-                    .child(div().w(px(110.0)).child(t.new_chunks));
+                    .child(div().w(px(90.0)).child(t.files_done))
+                    .child(div().w(px(90.0)).child(t.new_chunks));
 
                 let rows: Vec<AnyElement> = self
                     .recent_runs
@@ -3002,16 +3098,30 @@ impl RustBackupApp {
                             .gap_4()
                             .p_2()
                             .rounded_md()
-                            .child(div().w(px(180.0)).child(job.clone()))
-                            .child(div().w(px(90.0)).text_color(color).child(label.to_string()))
+                            .child(div().w(px(160.0)).child(job.clone()))
+                            .child(div().w(px(80.0)).text_color(color).child(label.to_string()))
+                            .child(
+                                div()
+                                    .w(px(90.0))
+                                    .text_color(if run.kind == rb_core::domain::BackupKind::Full {
+                                        cx.theme().primary
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
+                                    .child(if run.kind == rb_core::domain::BackupKind::Full {
+                                        t.mode_full
+                                    } else {
+                                        t.mode_incremental
+                                    }),
+                            )
                             .child(
                                 div()
                                     .flex_1()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(run.started_at.to_rfc3339()),
                             )
-                            .child(div().w(px(110.0)).child(run.files_total.to_string()))
-                            .child(div().w(px(110.0)).child(run.chunks_new.to_string()))
+                            .child(div().w(px(90.0)).child(run.files_total.to_string()))
+                            .child(div().w(px(90.0)).child(run.chunks_new.to_string()))
                             .into_any_element()
                     })
                     .collect();

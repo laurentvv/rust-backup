@@ -78,6 +78,7 @@ fn fixture(tag: &str) -> Fixture {
         destination: Destination::Local { root: dest.clone() },
         compression_level: 5,
         excludes: vec![],
+        max_incrementals: 10,
         created_at: chrono::Utc::now(),
     };
 
@@ -231,6 +232,7 @@ fn cancelled_run_leaves_no_snapshot_manifest() {
         &fixture.job,
         &BackupOptions {
             cancel: Some(cancel),
+            ..Default::default()
         },
         cancel_after_first,
     );
@@ -401,4 +403,119 @@ fn concurrent_run_backup_is_refused_by_lock() {
         matches!(err, rb_core::Error::RepositoryLocked(_)),
         "expected RepositoryLocked, got {err:?}"
     );
+}
+
+#[test]
+fn cadence_schedules_full_after_x_incrementals_and_force_full_works() {
+    use rb_core::domain::BackupKind;
+
+    let mut fixture = fixture("cadence");
+    // Set cadence: 1 full backup every 2 incrementals
+    fixture.job.max_incrementals = 2;
+
+    // 1. Initial backup is always Full
+    let (m1, s1) = run_backup(
+        &fixture.repo,
+        &fixture.job,
+        &BackupOptions::default(),
+        |_| Ok(()),
+    )
+    .expect("run 1");
+    assert_eq!(m1.kind, BackupKind::Full);
+    assert_eq!(s1.kind, BackupKind::Full);
+    assert_eq!(
+        fixture
+            .repo
+            .count_consecutive_incrementals_for_job(&fixture.job.id)
+            .unwrap(),
+        0
+    );
+
+    // 2. First incremental run (1/2)
+    let (m2, s2) = run_backup(
+        &fixture.repo,
+        &fixture.job,
+        &BackupOptions::default(),
+        |_| Ok(()),
+    )
+    .expect("run 2");
+    assert_eq!(m2.kind, BackupKind::Incremental);
+    assert_eq!(s2.kind, BackupKind::Incremental);
+    assert_eq!(
+        fixture
+            .repo
+            .count_consecutive_incrementals_for_job(&fixture.job.id)
+            .unwrap(),
+        1
+    );
+
+    // 3. Second incremental run (2/2)
+    let (m3, s3) = run_backup(
+        &fixture.repo,
+        &fixture.job,
+        &BackupOptions::default(),
+        |_| Ok(()),
+    )
+    .expect("run 3");
+    assert_eq!(m3.kind, BackupKind::Incremental);
+    assert_eq!(s3.kind, BackupKind::Incremental);
+    assert_eq!(
+        fixture
+            .repo
+            .count_consecutive_incrementals_for_job(&fixture.job.id)
+            .unwrap(),
+        2
+    );
+
+    // 4. Third run automatically becomes Full because 2 consecutive incrementals were reached!
+    let (m4, s4) = run_backup(
+        &fixture.repo,
+        &fixture.job,
+        &BackupOptions::default(),
+        |_| Ok(()),
+    )
+    .expect("run 4");
+    assert_eq!(
+        m4.kind,
+        BackupKind::Full,
+        "cadence must trigger Full backup"
+    );
+    assert_eq!(s4.kind, BackupKind::Full);
+    assert_eq!(
+        fixture
+            .repo
+            .count_consecutive_incrementals_for_job(&fixture.job.id)
+            .unwrap(),
+        0,
+        "consecutive incrementals counter must reset after Full backup"
+    );
+
+    // 5. Next run is Incremental again
+    let (m5, s5) = run_backup(
+        &fixture.repo,
+        &fixture.job,
+        &BackupOptions::default(),
+        |_| Ok(()),
+    )
+    .expect("run 5");
+    assert_eq!(m5.kind, BackupKind::Incremental);
+    assert_eq!(s5.kind, BackupKind::Incremental);
+
+    // 6. Explicit force_kind = Some(BackupKind::Full) forces a Full run immediately
+    let (m6, s6) = run_backup(
+        &fixture.repo,
+        &fixture.job,
+        &BackupOptions {
+            cancel: None,
+            force_kind: Some(BackupKind::Full),
+        },
+        |_| Ok(()),
+    )
+    .expect("run 6");
+    assert_eq!(
+        m6.kind,
+        BackupKind::Full,
+        "force_kind must override cadence"
+    );
+    assert_eq!(s6.kind, BackupKind::Full);
 }

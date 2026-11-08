@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::{JobId, SnapshotId};
+use crate::domain::{BackupKind, JobId, SnapshotId};
 use crate::hash::ChunkHash;
 
 /// Manifest format version.
@@ -88,6 +88,9 @@ pub struct SnapshotManifest {
     pub sources: Vec<SourceSnapshot>,
     /// Files skipped during the run, with reasons.
     pub skipped: Vec<SkippedItem>,
+    /// Kind of backup that produced this snapshot (full or incremental).
+    #[serde(default)]
+    pub kind: BackupKind,
 }
 
 impl SnapshotManifest {
@@ -103,6 +106,7 @@ impl SnapshotManifest {
             host: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "unknown".into()),
             sources: Vec::new(),
             skipped: Vec::new(),
+            kind: BackupKind::Incremental,
         }
     }
 

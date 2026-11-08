@@ -23,3 +23,8 @@ filetime.workspace = true
 russh.workspace = true
 russh-sftp.workspace = true
 tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Process liveness probe for stale-lock recovery (OpenProcess /
+# GetExitCodeProcess / GetProcessTimes). Version already in Cargo.lock.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

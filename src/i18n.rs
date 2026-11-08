@@ -180,6 +180,12 @@ pub struct Texts {
     pub init_repo: &'static str,
     /// Repository initialized toast.
     pub repo_initialized: &'static str,
+    /// Run page: destination holds no repository (banner).
+    pub repo_missing: &'static str,
+    /// Run page: explanation before the explicit init confirmation.
+    pub repo_missing_desc: &'static str,
+    /// Run page: confirm init then back up.
+    pub init_and_backup: &'static str,
     /// Quick verification option.
     pub verify_quick: &'static str,
     /// Full verification option.
@@ -335,6 +341,9 @@ pub const FR: Texts = Texts {
     confirm_delete_desc: "Supprimer définitivement cette tâche ? Les sauvegardes existantes restent intactes.",
     init_repo: "Initialiser le dépôt",
     repo_initialized: "Dépôt initialisé avec succès",
+    repo_missing: "Aucun dépôt à cette destination",
+    repo_missing_desc: "Rien n'a été écrit. S'il s'agit d'un disque amovible, vérifiez qu'il est branché et qu'il porte bien la même lettre de lecteur. Sinon, confirmez la création d'un nouveau dépôt chiffré à cet emplacement.",
+    init_and_backup: "Créer le dépôt ici et sauvegarder",
     verify_quick: "Rapide (métadonnées)",
     verify_full: "Complète (hachage BLAKE3)",
     verify_mode: "Mode de vérification",
@@ -456,6 +465,9 @@ pub const EN: Texts = Texts {
     confirm_delete_desc: "Permanently delete this job? Existing backups remain intact.",
     init_repo: "Initialize repository",
     repo_initialized: "Repository initialized successfully",
+    repo_missing: "No repository at this destination",
+    repo_missing_desc: "Nothing was written. If this is a removable disk, check that it is plugged in and still has the same drive letter. Otherwise, confirm creating a new encrypted repository at this location.",
+    init_and_backup: "Create repository here and back up",
     verify_quick: "Quick (metadata)",
     verify_full: "Full (BLAKE3 hash)",
     verify_mode: "Verification mode",

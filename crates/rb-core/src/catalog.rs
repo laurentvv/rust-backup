@@ -60,6 +60,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
     );
     "#,
     ),
+    (
+        "0003_job_excludes",
+        r#"
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS excludes_json VARCHAR DEFAULT '[]';
+    "#,
+    ),
 ];
 
 /// Cached snapshot row for fast browsing (local catalog only; the
@@ -160,9 +166,10 @@ impl Catalog {
         job.validate()?;
         let sources = serde_json::to_string(&job.sources)?;
         let destination = serde_json::to_string(&job.destination)?;
+        let excludes = serde_json::to_string(&job.excludes)?;
         self.conn.execute(
-            "INSERT INTO jobs (id, name, sources_json, destination_json, compression_level, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO jobs (id, name, sources_json, destination_json, compression_level, created_at, excludes_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
             duckdb::params![
                 job.id.to_string(),
                 job.name,
@@ -170,9 +177,36 @@ impl Catalog {
                 destination,
                 job.compression_level,
                 job.created_at.to_rfc3339(),
+                excludes,
             ],
         )?;
         Ok(())
+    }
+
+    /// Updates an existing job configuration.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidJob`] on validation failure, [`Error::Catalog`] on
+    /// database errors.
+    pub fn update_job(&self, job: &JobConfig) -> crate::Result<bool> {
+        job.validate()?;
+        let sources = serde_json::to_string(&job.sources)?;
+        let destination = serde_json::to_string(&job.destination)?;
+        let excludes = serde_json::to_string(&job.excludes)?;
+        let updated = self.conn.execute(
+            "UPDATE jobs SET name = ?, sources_json = ?, destination_json = ?, compression_level = ?, excludes_json = ?
+             WHERE id = ?",
+            duckdb::params![
+                job.name,
+                sources,
+                destination,
+                job.compression_level,
+                excludes,
+                job.id.to_string(),
+            ],
+        )?;
+        Ok(updated > 0)
     }
 
     /// Lists all jobs ordered by name.
@@ -184,7 +218,7 @@ impl Catalog {
     pub fn list_jobs(&self) -> crate::Result<Vec<JobConfig>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, sources_json, destination_json, compression_level, created_at FROM jobs ORDER BY name")?;
+            .prepare("SELECT id, name, sources_json, destination_json, compression_level, created_at, COALESCE(excludes_json, '[]') FROM jobs ORDER BY name")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -193,11 +227,12 @@ impl Catalog {
                 row.get::<_, String>(3)?,
                 row.get::<_, i32>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })?;
         let mut jobs = Vec::new();
         for row in rows {
-            let (id, name, sources_json, dest_json, level, created) = row?;
+            let (id, name, sources_json, dest_json, level, created, excludes_json) = row?;
             jobs.push(JobConfig {
                 id: Uuid::parse_str(&id).map_err(|e| {
                     crate::Error::InvalidJob(format!("stored job id not a uuid: {e}"))
@@ -206,6 +241,7 @@ impl Catalog {
                 sources: serde_json::from_str(&sources_json)?,
                 destination: serde_json::from_str(&dest_json)?,
                 compression_level: level,
+                excludes: serde_json::from_str(&excludes_json).unwrap_or_default(),
                 created_at: DateTime::parse_from_rfc3339(&created)
                     .map_err(|e| {
                         crate::Error::InvalidJob(format!("stored created_at invalid: {e}"))
@@ -457,6 +493,7 @@ mod tests {
                 root: PathBuf::from(r"E:\Backups\rust-backup"),
             },
             compression_level: 5,
+            excludes: vec!["target".into(), "*.tmp".into()],
             created_at: Utc::now(),
         }
     }
@@ -474,6 +511,25 @@ mod tests {
         assert_eq!(listed[0].sources, job.sources);
         assert_eq!(listed[0].destination, job.destination);
         assert_eq!(listed[0].compression_level, 5);
+        assert_eq!(listed[0].excludes, vec!["target", "*.tmp"]);
+    }
+
+    #[test]
+    fn update_job_should_modify_fields_and_persist() {
+        let catalog = Catalog::open_in_memory().expect("in-memory catalog");
+        let mut job = sample_job("photos");
+        catalog.insert_job(&job).expect("insert job");
+
+        job.name = "photos-edited".into();
+        job.compression_level = 9;
+        job.excludes = vec!["*.raw".into()];
+        assert!(catalog.update_job(&job).expect("update job"));
+
+        let listed = catalog.list_jobs().expect("list jobs");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "photos-edited");
+        assert_eq!(listed[0].compression_level, 9);
+        assert_eq!(listed[0].excludes, vec!["*.raw".to_string()]);
     }
 
     #[test]

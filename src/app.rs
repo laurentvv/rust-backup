@@ -81,6 +81,15 @@ pub struct RustBackupApp {
     form_name: gpui::Entity<InputState>,
     form_source: gpui::Entity<InputState>,
     form_dest: gpui::Entity<InputState>,
+    form_is_sftp: bool,
+    form_sftp_host: gpui::Entity<InputState>,
+    form_sftp_port: gpui::Entity<InputState>,
+    form_sftp_user: gpui::Entity<InputState>,
+    form_sftp_key: gpui::Entity<InputState>,
+    form_sftp_root: gpui::Entity<InputState>,
+    form_excludes: gpui::Entity<InputState>,
+    form_compression: i32,
+    editing_job_id: Option<JobId>,
     form_passphrase: gpui::Entity<InputState>,
 
     phase: RunPhase,
@@ -127,6 +136,20 @@ impl RustBackupApp {
                 .new(|cx| InputState::new(window, cx).placeholder(r"C:\Users\moi\Documents")),
             form_dest: cx
                 .new(|cx| InputState::new(window, cx).placeholder(r"E:\Sauvegardes\depot")),
+            form_is_sftp: false,
+            form_sftp_host: cx
+                .new(|cx| InputState::new(window, cx).placeholder("backup.example.com")),
+            form_sftp_port: cx.new(|cx| InputState::new(window, cx).placeholder("22")),
+            form_sftp_user: cx.new(|cx| InputState::new(window, cx).placeholder("backup")),
+            form_sftp_key: cx
+                .new(|cx| InputState::new(window, cx).placeholder(r"C:\Users\moi\.ssh\id_ed25519")),
+            form_sftp_root: cx
+                .new(|cx| InputState::new(window, cx).placeholder("/var/backups/rust-backup")),
+            form_excludes: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("target, node_modules, .git, *.tmp")
+            }),
+            form_compression: 5,
+            editing_job_id: None,
             form_passphrase: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("••••••••••")
@@ -561,40 +584,252 @@ impl RustBackupApp {
         }
     }
 
-    fn create_job(&mut self, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+    fn browse_path(
+        &self,
+        target_state: gpui::Entity<InputState>,
+        directories: bool,
+        files: bool,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files,
+            directories,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(path) = paths.first()
+            {
+                let path_str = path.display().to_string();
+                let _ = this.update_in(cx, |_, window, cx| {
+                    target_state.update(cx, |input, cx| {
+                        input.set_value(path_str, window, cx);
+                    });
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn create_or_update_job(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         let name = self.form_name.read(cx).value().to_string();
-        let source = self.form_source.read(cx).value().to_string();
-        let dest = self.form_dest.read(cx).value().to_string();
+        let source_str = self.form_source.read(cx).value().to_string();
+        let sources: Vec<std::path::PathBuf> = source_str
+            .split(&[';', ','][..])
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
+
+        let raw_excludes = self.form_excludes.read(cx).value().to_string();
+        let excludes: Vec<String> = raw_excludes
+            .split(&[',', ';'][..])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let destination = if self.form_is_sftp {
+            let host = self.form_sftp_host.read(cx).value().to_string();
+            let port = self
+                .form_sftp_port
+                .read(cx)
+                .value()
+                .parse::<u16>()
+                .unwrap_or(22);
+            let username = self.form_sftp_user.read(cx).value().to_string();
+            let key_path =
+                std::path::PathBuf::from(self.form_sftp_key.read(cx).value().to_string());
+            let remote_root = self.form_sftp_root.read(cx).value().to_string();
+            Destination::Sftp {
+                host,
+                port,
+                username,
+                key_path,
+                remote_root,
+            }
+        } else {
+            let dest = self.form_dest.read(cx).value().to_string();
+            Destination::Local {
+                root: std::path::PathBuf::from(dest),
+            }
+        };
+
+        let is_editing = self.editing_job_id.is_some();
+        let job_id = self.editing_job_id.unwrap_or_else(Uuid::new_v4);
         let job = JobConfig {
-            id: Uuid::new_v4(),
-            name,
-            sources: vec![source.into()],
-            destination: Destination::Local { root: dest.into() },
-            compression_level: 5,
+            id: job_id,
+            name: name.clone(),
+            sources,
+            destination,
+            compression_level: self.form_compression,
+            excludes,
             created_at: chrono::Utc::now(),
         };
+
         if let Err(e) = job.validate() {
             self.toast = Some((true, e.to_string()));
             cx.notify();
             return;
         }
+
         let Some(path) = self.catalog_path() else {
             return;
         };
-        match Catalog::open(&path).and_then(|catalog| catalog.insert_job(&job).map(|_| catalog)) {
-            Ok(_) => {
-                // Insert in place: a second catalog re-open right after the
-                // insert connection closes is the fragile path (silently
-                // bailed on DuckDB file-lock timing), which left the list
-                // stale (bug caught by the GUI walkthrough).
-                self.jobs.push(job.clone());
-                self.jobs.sort_by(|a, b| a.name.cmp(&b.name));
-                self.toast = Some((false, format!("{} ✓ {}", self.texts().create, job.name)));
+
+        let Ok(catalog) = Catalog::open(&path) else {
+            self.toast = Some((true, "Failed to open catalog".into()));
+            cx.notify();
+            return;
+        };
+
+        if is_editing {
+            match catalog.update_job(&job) {
+                Ok(_) => {
+                    if let Some(existing) = self.jobs.iter_mut().find(|j| j.id == job_id) {
+                        *existing = job.clone();
+                    }
+                    self.editing_job_id = None;
+                    self.toast = Some((
+                        false,
+                        format!("{} ✓ {}", self.texts().job_updated, job.name),
+                    ));
+                    self.reset_job_form(window, cx);
+                }
+                Err(e) => self.toast = Some((true, e.to_string())),
             }
-            Err(e) => self.toast = Some((true, e.to_string())),
+        } else {
+            match catalog.insert_job(&job) {
+                Ok(_) => {
+                    self.jobs.push(job.clone());
+                    self.jobs.sort_by(|a, b| a.name.cmp(&b.name));
+                    self.toast = Some((false, format!("{} ✓ {}", self.texts().create, job.name)));
+                    self.reset_job_form(window, cx);
+                }
+                Err(e) => self.toast = Some((true, e.to_string())),
+            }
         }
         self.auto_dismiss_toast(cx);
         cx.notify();
+    }
+
+    fn reset_job_form(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        self.editing_job_id = None;
+        self.form_name
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.form_source
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.form_dest
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.form_sftp_host
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.form_sftp_port
+            .update(cx, |input, cx| input.set_value("22", window, cx));
+        self.form_sftp_user
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.form_sftp_key
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.form_sftp_root
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.form_excludes
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.form_compression = 5;
+    }
+
+    fn start_edit_job(
+        &mut self,
+        job_id: JobId,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
+            return;
+        };
+        self.editing_job_id = Some(job_id);
+        self.form_name
+            .update(cx, |input, cx| input.set_value(&job.name, window, cx));
+        let sources_str = job
+            .sources
+            .iter()
+            .map(|s| s.display().to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        self.form_source
+            .update(cx, |input, cx| input.set_value(sources_str, window, cx));
+        self.form_compression = job.compression_level;
+        self.form_excludes.update(cx, |input, cx| {
+            input.set_value(job.excludes.join(", "), window, cx);
+        });
+
+        match &job.destination {
+            Destination::Local { root } => {
+                self.form_is_sftp = false;
+                self.form_dest.update(cx, |input, cx| {
+                    input.set_value(root.display().to_string(), window, cx);
+                });
+            }
+            Destination::Sftp {
+                host,
+                port,
+                username,
+                key_path,
+                remote_root,
+            } => {
+                self.form_is_sftp = true;
+                self.form_sftp_host
+                    .update(cx, |input, cx| input.set_value(host, window, cx));
+                self.form_sftp_port.update(cx, |input, cx| {
+                    input.set_value(port.to_string(), window, cx)
+                });
+                self.form_sftp_user
+                    .update(cx, |input, cx| input.set_value(username, window, cx));
+                self.form_sftp_key.update(cx, |input, cx| {
+                    input.set_value(key_path.display().to_string(), window, cx);
+                });
+                self.form_sftp_root
+                    .update(cx, |input, cx| input.set_value(remote_root, window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn init_job_repo(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+        job_id: JobId,
+    ) {
+        let t = self.texts();
+        let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
+            return;
+        };
+        let passphrase = self.passphrase_or_form(cx);
+        if passphrase.is_empty() {
+            self.toast = Some((true, t.passphrase_needed.to_string()));
+            cx.notify();
+            return;
+        }
+        self.toast = Some((false, format!("{} …", t.init_repo)));
+        cx.notify();
+        let rx = runner::spawn_init_repo(job, passphrase);
+        cx.spawn(async move |this, cx| {
+            if let Ok(result) = rx.recv_async().await {
+                let _ = this.update(cx, |app, cx| {
+                    match result {
+                        Ok(msg) => {
+                            app.toast =
+                                Some((false, format!("{} ✓ {msg}", app.texts().repo_initialized)));
+                        }
+                        Err(err) => app.toast = Some((true, err)),
+                    }
+                    app.auto_dismiss_toast(cx);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Clears the current toast after a few seconds.
@@ -868,127 +1103,428 @@ impl RustBackupApp {
 
     fn render_jobs(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let t = self.texts();
-        let rows: Vec<AnyElement> = self
-            .jobs
-            .iter()
-            .map(|job| {
-                h_flex()
-                    .id(gpui::SharedString::new(job.id.to_string()))
-                    .justify_between()
-                    .gap_3()
-                    .p_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
-                    .child(
+        let rows: Vec<AnyElement> =
+            self.jobs
+                .iter()
+                .map(|job| {
+                    let (dest_icon, dest_type_name) = match &job.destination {
+                        Destination::Local { .. } => (IconName::HardDrive, t.local),
+                        Destination::Sftp { .. } => (IconName::Server, t.sftp),
+                    };
+                    let id = job.id;
+                    let sources_display = job
+                        .sources
+                        .iter()
+                        .map(|s| s.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let excludes_display = if job.excludes.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} : {}", t.excludes, job.excludes.join(", "))
+                    };
+
+                    h_flex()
+                        .id(gpui::SharedString::new(job.id.to_string()))
+                        .justify_between()
+                        .gap_3()
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().background)
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_size(px(14.0))
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(cx.theme().foreground)
+                                                .child(job.name.clone()),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_md()
+                                                .bg(cx.theme().primary.opacity(0.12))
+                                                .text_size(px(10.0))
+                                                .text_color(cx.theme().primary)
+                                                .child(Icon::new(dest_icon).size_3())
+                                                .child(dest_type_name),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_md()
+                                                .bg(cx.theme().selection.opacity(0.5))
+                                                .text_size(px(10.0))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("zstd-{}", job.compression_level)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(job.destination.describe()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("{} : {}", t.source, sources_display)),
+                                )
+                                .when(!excludes_display.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(cx.theme().muted_foreground.opacity(0.8))
+                                            .child(excludes_display),
+                                    )
+                                }),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    Button::new(gpui::SharedString::new(format!(
+                                        "run-{}",
+                                        job.id.simple()
+                                    )))
+                                    .primary()
+                                    .label(t.run_now)
+                                    .icon(IconName::Play)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.start_backup(window, cx, id);
+                                    })),
+                                )
+                                .child(
+                                    Button::new(gpui::SharedString::new(format!(
+                                        "verify-{}",
+                                        job.id.simple()
+                                    )))
+                                    .ghost()
+                                    .icon(IconName::ShieldCheck)
+                                    .label(t.verify)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.run_verify(window, cx, id, false);
+                                    })),
+                                )
+                                .child(
+                                    Button::new(gpui::SharedString::new(format!(
+                                        "edit-{}",
+                                        job.id.simple()
+                                    )))
+                                    .ghost()
+                                    .icon(IconName::SlidersHorizontal)
+                                    .label(t.edit)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.start_edit_job(id, window, cx);
+                                    })),
+                                )
+                                .child(
+                                    Button::new(gpui::SharedString::new(format!(
+                                        "init-{}",
+                                        job.id.simple()
+                                    )))
+                                    .ghost()
+                                    .icon(IconName::Sparkles)
+                                    .label(t.init_repo)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.init_job_repo(window, cx, id);
+                                    })),
+                                )
+                                .child(
+                                    Button::new(gpui::SharedString::new(format!(
+                                        "del-{}",
+                                        job.id.simple()
+                                    )))
+                                    .ghost()
+                                    .icon(IconName::Trash)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.delete_job(window, cx, id);
+                                    })),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect();
+
+        let is_editing = self.editing_job_id.is_some();
+        let form_title = if is_editing {
+            format!("{} ({})", t.edit, t.jobs)
+        } else {
+            t.new_job.to_string()
+        };
+
+        let form =
+            v_flex()
+                .gap_3()
+                .p_4()
+                .rounded_lg()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground)
+                        .child(form_title),
+                )
+                .child(self.labeled_input(t.name, &self.form_name))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_size(px(12.0)).child(t.source.to_string()))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(div().flex_1().child(Input::new(&self.form_source)))
+                                .child(
+                                    Button::new("browse-source")
+                                        .ghost()
+                                        .icon(IconName::FolderOpen)
+                                        .label(t.browse)
+                                        .on_click(cx.listener({
+                                            let state = self.form_source.clone();
+                                            move |this, _, window, cx| {
+                                                this.browse_path(
+                                                    state.clone(),
+                                                    true,
+                                                    false,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        })),
+                                ),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .child(t.destination_type.to_string()),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("dest-type-local")
+                                        .label(t.local)
+                                        .when(!self.form_is_sftp, |b| b.primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.form_is_sftp = false;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("dest-type-sftp")
+                                        .label(t.sftp)
+                                        .when(self.form_is_sftp, |b| b.primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.form_is_sftp = true;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+                .when(!self.form_is_sftp, |this| {
+                    this.child(
                         v_flex()
                             .gap_1()
+                            .child(div().text_size(px(12.0)).child(t.local_root.to_string()))
                             .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .text_color(cx.theme().foreground)
-                                    .child(job.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(job.destination.describe()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "{} : {}",
-                                        t.source,
-                                        job.sources
-                                            .first()
-                                            .map(|s| s.display().to_string())
-                                            .unwrap_or_default()
-                                    )),
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().flex_1().child(Input::new(&self.form_dest)))
+                                    .child(
+                                        Button::new("browse-dest")
+                                            .ghost()
+                                            .icon(IconName::FolderOpen)
+                                            .label(t.browse)
+                                            .on_click(cx.listener({
+                                                let state = self.form_dest.clone();
+                                                move |this, _, window, cx| {
+                                                    this.browse_path(
+                                                        state.clone(),
+                                                        true,
+                                                        false,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                    ),
                             ),
                     )
-                    .child(
-                        h_flex()
+                })
+                .when(self.form_is_sftp, |this| {
+                    this.child(
+                        v_flex()
                             .gap_2()
                             .child(
-                                Button::new(gpui::SharedString::new(format!(
-                                    "run-{}",
-                                    job.id.simple()
-                                )))
-                                .primary()
-                                .label(t.run_now)
-                                .icon(IconName::Play)
-                                .on_click(cx.listener({
-                                    let id = job.id;
-                                    move |this, _, window, cx| {
-                                        this.start_backup(window, cx, id);
-                                    }
-                                })),
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().flex_1().child(
+                                        self.labeled_input(t.sftp_host, &self.form_sftp_host),
+                                    ))
+                                    .child(div().w(px(120.0)).child(
+                                        self.labeled_input(t.sftp_port, &self.form_sftp_port),
+                                    )),
                             )
+                            .child(self.labeled_input(t.sftp_user, &self.form_sftp_user))
                             .child(
-                                Button::new(gpui::SharedString::new(format!(
-                                    "verify-{}",
-                                    job.id.simple()
-                                )))
-                                .ghost()
-                                .icon(IconName::ShieldCheck)
-                                .label(t.verify)
-                                .on_click(cx.listener({
-                                    let id = job.id;
-                                    move |this, _, window, cx| {
-                                        this.run_verify(window, cx, id, false);
-                                    }
-                                })),
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_size(px(12.0)).child(t.sftp_key.to_string()))
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .child(Input::new(&self.form_sftp_key)),
+                                            )
+                                            .child(
+                                                Button::new("browse-key")
+                                                    .ghost()
+                                                    .icon(IconName::FolderOpen)
+                                                    .label(t.browse)
+                                                    .on_click(cx.listener({
+                                                        let state = self.form_sftp_key.clone();
+                                                        move |this, _, window, cx| {
+                                                            this.browse_path(
+                                                                state.clone(),
+                                                                false,
+                                                                true,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        }
+                                                    })),
+                                            ),
+                                    ),
                             )
-                            .child(
-                                Button::new(gpui::SharedString::new(format!(
-                                    "del-{}",
-                                    job.id.simple()
-                                )))
-                                .ghost()
-                                .icon(IconName::Trash)
-                                .on_click(cx.listener({
-                                    let id = job.id;
-                                    move |this, _, window, cx| {
-                                        this.delete_job(window, cx, id);
-                                    }
-                                })),
-                            ),
+                            .child(self.labeled_input(t.sftp_root, &self.form_sftp_root)),
                     )
-                    .into_any_element()
-            })
-            .collect();
-
-        let form = v_flex()
-            .gap_3()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .child(
-                div()
-                    .text_size(px(15.0))
-                    .text_color(cx.theme().foreground)
-                    .child(t.new_job),
-            )
-            .child(self.labeled_input(t.name, &self.form_name))
-            .child(self.labeled_input(t.source, &self.form_source))
-            .child(self.labeled_input(t.local_root, &self.form_dest))
-            .child(
-                h_flex().gap_2().child(
-                    Button::new("create-job")
-                        .primary()
-                        .icon(IconName::Plus)
-                        .label(t.create)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.create_job(window, cx);
-                        })),
-                ),
-            );
+                })
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .child(format!("{} ({})", t.excludes, t.excludes_help)),
+                                )
+                                .child(
+                                    Button::new("preset-dev")
+                                        .ghost()
+                                        .label("Preset: Dev")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.form_excludes.update(cx, |input, cx| {
+                                                input.set_value(
+                                                    "target, node_modules, .git, *.tmp",
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(Input::new(&self.form_excludes)),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_size(px(12.0)).child(t.compression.to_string()))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("comp-0")
+                                        .label("0 (aucun)")
+                                        .when(self.form_compression == 0, |b| b.primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.form_compression = 0;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("comp-1")
+                                        .label("1 (rapide)")
+                                        .when(self.form_compression == 1, |b| b.primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.form_compression = 1;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("comp-5")
+                                        .label("5 (équilibré)")
+                                        .when(self.form_compression == 5, |b| b.primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.form_compression = 5;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("comp-15")
+                                        .label("15 (max)")
+                                        .when(self.form_compression == 15, |b| b.primary())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.form_compression = 15;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("submit-job")
+                                .primary()
+                                .icon(if is_editing {
+                                    IconName::Check
+                                } else {
+                                    IconName::Plus
+                                })
+                                .label(if is_editing { t.save } else { t.create })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.create_or_update_job(window, cx);
+                                })),
+                        )
+                        .when(is_editing, |this| {
+                            this.child(
+                                Button::new("cancel-edit")
+                                    .ghost()
+                                    .icon(IconName::X)
+                                    .label(t.cancel)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reset_job_form(window, cx);
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                );
 
         let mut jobs_list = v_flex().gap_2();
         for row in rows {
@@ -1500,7 +2036,29 @@ impl RustBackupApp {
                                 ),
                         )
                         .when(!self.restore_to_original, |this| {
-                            this.child(Input::new(&self.restore_target))
+                            this.child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().flex_1().child(Input::new(&self.restore_target)))
+                                    .child(
+                                        Button::new("browse-restore-target")
+                                            .ghost()
+                                            .icon(IconName::FolderOpen)
+                                            .label(t.browse)
+                                            .on_click(cx.listener({
+                                                let state = self.restore_target.clone();
+                                                move |this, _, window, cx| {
+                                                    this.browse_path(
+                                                        state.clone(),
+                                                        true,
+                                                        false,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                    ),
+                            )
                         })
                         .child(
                             Button::new("toggle-overwrite")

@@ -65,6 +65,9 @@ pub struct JobConfig {
     pub destination: Destination,
     /// zstd compression level for stored chunks (1..=22, 0 = store raw).
     pub compression_level: i32,
+    /// Glob or name patterns to exclude from backups (e.g. `target`, `node_modules`, `*.tmp`).
+    #[serde(default)]
+    pub excludes: Vec<String>,
     /// Creation timestamp (UTC).
     pub created_at: DateTime<Utc>,
 }
@@ -162,4 +165,96 @@ pub struct RunRecord {
     pub bytes_new: u64,
     /// Error message when the run failed.
     pub error: Option<String>,
+}
+
+/// Checks whether a relative path matches an exclusion pattern.
+///
+/// Supported patterns:
+/// - Directory or file name exact match (e.g. `target`, `node_modules`, `.git`, `Thumbs.db`)
+/// - Wildcard extension match (e.g. `*.tmp`, `*.log`, `*.bak`)
+/// - Prefix wildcard match (e.g. `cache*`, `temp*`)
+/// - Relative path match (e.g. `build/output`, `src/generated`)
+#[must_use]
+pub fn matches_exclude(rel_path: &std::path::Path, pattern: &str) -> bool {
+    let p = pattern.trim();
+    if p.is_empty() {
+        return false;
+    }
+    let p_clean = p.trim_matches('/').trim_matches('\\');
+    let rel_str = rel_path.to_string_lossy();
+    let file_name = rel_path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+
+    // 1. Wildcard extension, e.g. *.tmp
+    if let Some(ext) = p_clean.strip_prefix("*.")
+        && let Some(file_ext) = rel_path.extension().and_then(|e| e.to_str())
+        && file_ext.eq_ignore_ascii_case(ext)
+    {
+        return true;
+    }
+
+    // 2. Prefix wildcard, e.g. cache*
+    if let Some(prefix) = p_clean.strip_suffix('*')
+        && file_name.starts_with(prefix)
+    {
+        return true;
+    }
+
+    // 3. Exact component or directory name, e.g. node_modules, target, .git
+    if file_name.eq_ignore_ascii_case(p_clean) {
+        return true;
+    }
+
+    // 4. Any path component matches, e.g. rel_path has "target" as a directory
+    for comp in rel_path.components() {
+        if comp
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(p_clean)
+        {
+            return true;
+        }
+    }
+
+    // 5. Full relative path matches (normalized slashes)
+    let norm_rel = rel_str.replace('\\', "/");
+    let norm_p = p_clean.replace('\\', "/");
+    norm_rel == norm_p || norm_rel.ends_with(&format!("/{norm_p}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_matches_exclude() {
+        // Name matching
+        assert!(matches_exclude(Path::new("target"), "target"));
+        assert!(matches_exclude(Path::new("project/target"), "target"));
+        assert!(matches_exclude(
+            Path::new("project/target/debug/app.exe"),
+            "target"
+        ));
+        assert!(matches_exclude(
+            Path::new("node_modules/package/index.js"),
+            "node_modules"
+        ));
+        assert!(matches_exclude(Path::new(".git/HEAD"), ".git"));
+
+        // Extension wildcard
+        assert!(matches_exclude(Path::new("temp.tmp"), "*.tmp"));
+        assert!(matches_exclude(Path::new("sub/dir/test.log"), "*.log"));
+        assert!(!matches_exclude(Path::new("test.txt"), "*.tmp"));
+
+        // Prefix wildcard
+        assert!(matches_exclude(Path::new("cache_001.dat"), "cache*"));
+        assert!(matches_exclude(Path::new("sub/temp_dir"), "temp*"));
+
+        // Negative cases
+        assert!(!matches_exclude(Path::new("src/main.rs"), "target"));
+        assert!(!matches_exclude(Path::new("target_builder.rs"), "target"));
+    }
 }

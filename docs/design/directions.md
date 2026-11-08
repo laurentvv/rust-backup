@@ -1,6 +1,7 @@
 # Brand directions (J3.2) — decision gate
 
-> Status: **awaiting the owner's choice** of one direction and one product name (2026-11-07).
+> Status: **direction chosen 2026-11-08 — hybrid Strata + Ferrite**; product name still pending
+> (see "Decision record" at the end). J3.3 starts from the hybrid definition below.
 > Nothing downstream (J3.3 design system, J3.4 illustrations, J3.5 rename) starts before that choice.
 > Inputs: `docs/design/research/README.md` (J3.1). Visual comparison: `docs/design/directions/comparison.html`
 > (also published as a private Artifact). Logo sketches: `docs/design/directions/*-mark.svg`.
@@ -150,4 +151,27 @@ yet — that check is part of J3.5 before any rename.
 
 | Date | Decision | By |
 |---|---|---|
-| — | *pending* — direction: ☐ A ☐ B ☐ C ☐ hybrid · name: ______ | owner |
+| 2026-11-08 | Direction: **hybrid Strata + Ferrite** · name: *pending* | owner |
+
+### Chosen hybrid — working definition for J3.3
+
+The split follows the Fluent two-layer model (research §1): Strata owns the **base layer**, Ferrite owns the
+**content layer**.
+
+| Aspect | Taken from | Rule |
+|---|---|---|
+| Window, title bar, navigation | Strata | Mica backdrop (opaque fallback per theme), Fluent radii 8/4 px, nav rows like Windows Settings |
+| Body text, controls | Strata | Segoe UI Variable, Windows 11 type ramp, sentence case |
+| Icons | Strata | Fluent System Icons, regular at rest, filled when active |
+| Accent and primary action | Ferrite | Oxide (`#E8703A` dark, `#B4441C` light) replaces Strata's lapis; magnetite `#7F95A8` / `#4A6175` as data series 2 |
+| Numbers and technical labels | Ferrite | JetBrains Mono (embedded) for sizes, counts, hashes, timestamps; tabular figures |
+| Time visual | Ferrite | 30-day tape track on the dashboard (full / incremental / failure / today) |
+| Snapshot detail | Strata | Strata chart (new data per snapshot) stays on job detail / restore pages |
+| Hero | Strata structure, Ferrite tone | Hero card with status sentence + 2 actions + illustration; Big Shoulders Display is **dropped** to stay native (open question for J3.3: keep it for the wordmark only) |
+| Neutrals | Ferrite, warmed toward Mica | Dark: graphite family (`#0F1012`…`#2A2D32`) as Mica fallback/content; light: concrete `#E9E8E4` fallback, `#F6F5F2` content |
+| Illustrations | Mixed, to settle in J3.4 | Isometric objects (Ferrite) with the sediment ramp as secondary colors (Strata) |
+| Mark | To redraw in J3.3 | Candidate: the Strata core sample recolored with oxide/magnetite layers, or the Ferrite toroid; depends on the name |
+| Semantics | Strata (Fluent status) | Success/caution/critical tokens distinct from oxide; check that warning amber stays distinguishable from the oxide accent |
+
+Open items before J3.3 ends: product name (and trademark check in J3.5), final mark, whether the condensed display
+face survives anywhere.

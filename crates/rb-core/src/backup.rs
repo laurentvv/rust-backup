@@ -16,7 +16,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use walkdir::WalkDir;
 
@@ -164,6 +165,7 @@ pub fn run_backup(
     // One pipeline per run: in-memory chunk index + parallel compress/seal
     // workers + parallel upload writers on dedicated backend channels.
     let pipeline = ChunkPipeline::spawn(repo)?;
+    let run_started = Instant::now();
 
     for source_root in &job.sources {
         let root_key = source_root.to_string_lossy().to_string();
@@ -256,7 +258,10 @@ pub fn run_backup(
                 continue;
             }
 
-            match backup_file(&pipeline, abs, &chunker_cfg) {
+            let file_started = Instant::now();
+            let outcome = backup_file(&pipeline, abs, &chunker_cfg);
+            pipeline.times.add(&pipeline.times.file_ns, file_started);
+            match outcome {
                 Ok(mut result) => {
                     result.entry.path = rel.to_path_buf();
                     entries.push(result.entry);
@@ -295,11 +300,19 @@ pub fn run_backup(
     }
 
     // Every queued chunk must have landed before the manifest can exist.
+    let times = Arc::clone(&pipeline.times);
+    let walk_ns = run_started.elapsed().as_nanos();
+    let drain_started = Instant::now();
     pipeline.finish()?;
+    let drain_ns = drain_started.elapsed().as_nanos();
 
     // Finalize LAST: until this atomic write lands, the snapshot does not
     // exist for any reader (restores, verifies, listings).
+    let manifest_started = Instant::now();
     repo.write_manifest(&manifest)?;
+    if std::env::var_os(PROFILE_ENV).is_some() {
+        times.report(walk_ns, drain_ns, manifest_started.elapsed().as_nanos());
+    }
     on_event(BackupEvent::SnapshotFinalized {
         snapshot_id: manifest.id,
     })?;
@@ -372,19 +385,69 @@ fn is_cancelled(cancel: &Option<Arc<AtomicBool>>) -> bool {
         .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// Default parallel upload writers opened per run.
-const UPLOAD_WORKERS: usize = 4;
+/// Opt-in diagnostics: `RBACKUP_PROFILE=1` prints per-stage timings to
+/// stderr at the end of a backup run (no effect on the run itself).
+const PROFILE_ENV: &str = "RBACKUP_PROFILE";
 
-/// Parallel upload writers opened per run. Several channels overlap the
-/// server-side fsync latency that dominates slow destinations; tunable
-/// through `RBACKUP_UPLOAD_WORKERS` (clamped to 1..=16). OpenSSH caps a
-/// single SSH connection at `MaxSessions` (default 10) channels including
-/// the control session, so values above ~8 need a raised server limit.
+/// Cumulative stage timings of one run (nanoseconds; worker stages are
+/// summed over all their threads).
+#[derive(Default)]
+struct StageTimes {
+    /// Walk thread: whole `backup_file` calls (open, read, chunk, hash, submit).
+    file_ns: AtomicU64,
+    /// Walk thread: time blocked handing chunks to the full raw queue.
+    submit_wait_ns: AtomicU64,
+    /// Compress + encrypt workers.
+    seal_ns: AtomicU64,
+    /// Seal workers blocked on the full sealed queue.
+    sealed_wait_ns: AtomicU64,
+    /// Upload writers: `write_new` calls.
+    write_ns: AtomicU64,
+    /// Upload writers: `finish` calls (deferred flush/renames).
+    finish_ns: AtomicU64,
+}
+
+impl StageTimes {
+    fn add(&self, counter: &AtomicU64, since: Instant) {
+        let ns = u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        counter.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    #[allow(clippy::cast_precision_loss)] // human-readable seconds
+    fn report(&self, walk_ns: u128, drain_ns: u128, manifest_ns: u128) {
+        let s = |ns: u128| ns as f64 / 1e9;
+        let a = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e9;
+        eprintln!(
+            "profile: walk {:.2}s (files {:.2}s, waiting on raw queue {:.2}s) | drain {:.2}s | \
+             manifest {:.2}s | seal sum {:.2}s (blocked {:.2}s) | write sum {:.2}s | \
+             finish sum {:.2}s",
+            s(walk_ns),
+            a(&self.file_ns),
+            a(&self.submit_wait_ns),
+            s(drain_ns),
+            s(manifest_ns),
+            a(&self.seal_ns),
+            a(&self.sealed_wait_ns),
+            a(&self.write_ns),
+            a(&self.finish_ns),
+        );
+    }
+}
+
+/// Default parallel upload writers opened per run.
+const UPLOAD_WORKERS: usize = 8;
+
+/// Parallel upload writers opened per run. Several writers overlap the
+/// per-request latency of the destination; tunable through
+/// `RBACKUP_UPLOAD_WORKERS` (clamped to 1..=32). Over SFTP each writer has
+/// its own SSH connection by default, so the server's per-connection
+/// `MaxSessions` cap does not apply (it does with
+/// `RBACKUP_SFTP_WRITERS=channel`).
 fn upload_workers() -> usize {
     std::env::var("RBACKUP_UPLOAD_WORKERS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .map_or(UPLOAD_WORKERS, |n| n.clamp(1, 16))
+        .map_or(UPLOAD_WORKERS, |n| n.clamp(1, 32))
 }
 /// Chunks buffered between the walk thread and the compress/seal workers.
 /// Bounded so RAM stays sane even at the 4 MiB max chunk size.
@@ -428,6 +491,8 @@ struct ChunkPipeline {
     known: Arc<Mutex<HashSet<ChunkHash>>>,
     first_error: Arc<Mutex<Option<crate::Error>>>,
     workers: Vec<std::thread::JoinHandle<()>>,
+    /// Stage timings (reported with `RBACKUP_PROFILE`).
+    times: Arc<StageTimes>,
 }
 
 impl ChunkPipeline {
@@ -441,6 +506,7 @@ impl ChunkPipeline {
     fn spawn(repo: &Repository) -> crate::Result<Self> {
         let known = Arc::new(Mutex::new(load_chunk_index(repo)?));
         let first_error: Arc<Mutex<Option<crate::Error>>> = Arc::new(Mutex::new(None));
+        let times = Arc::new(StageTimes::default());
         let (raw_tx, raw_rx) = flume::bounded(RAW_QUEUE);
         let (sealed_tx, sealed_rx) = flume::bounded(SEALED_QUEUE);
         let mut workers = Vec::new();
@@ -452,20 +518,34 @@ impl ChunkPipeline {
         for worker_id in 0..wanted {
             let mut writer = backend.open_writer().map_err(|e| {
                 crate::Error::Repo(format!(
-                    "opening upload writer {}/{}: {e} — the server may cap concurrent SFTP \
-                     channels (OpenSSH MaxSessions, default 10); lower RBACKUP_UPLOAD_WORKERS",
+                    "opening upload writer {}/{}: {e} — the server may limit concurrent SSH \
+                     connections or channels (OpenSSH MaxStartups/MaxSessions); lower \
+                     RBACKUP_UPLOAD_WORKERS",
                     worker_id + 1,
                     wanted
                 ))
             })?;
             let rx: flume::Receiver<SealedChunk> = sealed_rx.clone();
             let errors = Arc::clone(&first_error);
+            let times = Arc::clone(&times);
             workers.push(std::thread::spawn(move || {
                 while let Ok(chunk) = rx.recv() {
-                    if let Err(e) = writer.write_new(&chunk.rel, &chunk.blob) {
+                    let started = Instant::now();
+                    let written = writer.write_new(&chunk.rel, &chunk.blob);
+                    times.add(&times.write_ns, started);
+                    if let Err(e) = written {
                         record_error(&errors, e);
-                        break;
+                        return;
                     }
+                }
+                // Queue drained: make every chunk of this writer durable
+                // under its final name (batched barrier backends defer
+                // that until here) before the manifest can be written.
+                let started = Instant::now();
+                let finished = writer.finish();
+                times.add(&times.finish_ns, started);
+                if let Err(e) = finished {
+                    record_error(&errors, e);
                 }
             }));
         }
@@ -477,9 +557,13 @@ impl ChunkPipeline {
             let rx: flume::Receiver<RawChunk> = raw_rx.clone();
             let tx: flume::Sender<SealedChunk> = sealed_tx.clone();
             let errors = Arc::clone(&first_error);
+            let times = Arc::clone(&times);
             workers.push(std::thread::spawn(move || {
                 while let Ok(chunk) = rx.recv() {
-                    let blob = match repo.seal_chunk_blob(&chunk.hash, &chunk.data) {
+                    let started = Instant::now();
+                    let sealed = repo.seal_chunk_blob(&chunk.hash, &chunk.data);
+                    times.add(&times.seal_ns, started);
+                    let blob = match sealed {
                         Ok(blob) => blob,
                         Err(e) => {
                             record_error(&errors, e);
@@ -487,7 +571,10 @@ impl ChunkPipeline {
                         }
                     };
                     let rel = Repository::chunk_rel(&chunk.hash);
-                    if tx.send(SealedChunk { rel, blob }).is_err() {
+                    let started = Instant::now();
+                    let sent = tx.send(SealedChunk { rel, blob });
+                    times.add(&times.sealed_wait_ns, started);
+                    if sent.is_err() {
                         break; // upload side gone; its error is recorded
                     }
                 }
@@ -500,6 +587,7 @@ impl ChunkPipeline {
             known,
             first_error,
             workers,
+            times,
         })
     }
 
@@ -522,7 +610,10 @@ impl ChunkPipeline {
             }
             known.insert(hash);
         }
-        if self.raw_tx.send(RawChunk { hash, data }).is_err() {
+        let started = Instant::now();
+        let sent = self.raw_tx.send(RawChunk { hash, data });
+        self.times.add(&self.times.submit_wait_ns, started);
+        if sent.is_err() {
             return Err(self.take_error().unwrap_or_else(|| {
                 crate::Error::Repo("chunk pipeline stopped unexpectedly".into())
             }));
@@ -545,6 +636,7 @@ impl ChunkPipeline {
             known: _,
             first_error,
             workers,
+            times: _,
         } = self;
         drop(raw_tx);
         drop(sealed_tx);

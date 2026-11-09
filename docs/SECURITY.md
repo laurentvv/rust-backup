@@ -17,6 +17,10 @@ Compression happens **before** encryption (compressing ciphertext is useless; th
 
 Trust-on-first-use: the SHA-256 fingerprint of the server key is pinned per `host:port` in a local known-hosts file; a later mismatch refuses the connection (interception guard). `AcceptAll` exists for the automated test suite only and is never exposed in the GUI.
 
+## Remote commands (SFTP)
+
+Besides the `sftp` subsystem, a backup run asks the server to execute one fixed, constant command: a `sync` loop used as the batched durability barrier (`docs/REPO_FORMAT.md`, Atomicity). No user data or path is ever interpolated into it. Restricting the key to SFTP only (`restrict,command="internal-sftp"` in `authorized_keys`) is supported and recommended for a dedicated backup key: the barrier probe then fails within 10 s and uploads fall back to a per-chunk fsync (slower on slow filesystems, same guarantees).
+
 ## Secret handling
 
 - Repository passphrase: `RBACKUP_PASSPHRASE` env (CLI) or an in-memory session field (GUI) — never a CLI argument, never logged, never echoed. Tests assert the error path leaks no passphrase.

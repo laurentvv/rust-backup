@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use russh::keys::ssh_key;
 use russh::server::Server as _;
@@ -53,6 +54,11 @@ fn random_bytes(len: usize, seed: u64) -> Vec<u8> {
 struct TestSshServer {
     expected_public: ssh_key::PublicKey,
     fs_root: PathBuf,
+    /// Accept exec requests (the remote `sync` barrier loop) — false mimics
+    /// an account restricted to SFTP (`command="internal-sftp"`).
+    allow_exec: bool,
+    /// Number of barrier `sync` requests served.
+    syncs: Arc<AtomicUsize>,
 }
 
 impl russh::server::Server for TestSshServer {
@@ -62,6 +68,8 @@ impl russh::server::Server for TestSshServer {
         TestSshSession {
             expected_public: self.expected_public.clone(),
             fs_root: self.fs_root.clone(),
+            allow_exec: self.allow_exec,
+            syncs: Arc::clone(&self.syncs),
             channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -70,6 +78,8 @@ impl russh::server::Server for TestSshServer {
 struct TestSshSession {
     expected_public: ssh_key::PublicKey,
     fs_root: PathBuf,
+    allow_exec: bool,
+    syncs: Arc<AtomicUsize>,
     channels: Arc<tokio::sync::Mutex<HashMap<ChannelId, Channel<Msg>>>>,
 }
 
@@ -96,6 +106,43 @@ impl russh::server::Handler for TestSshSession {
     ) -> Result<(), Self::Error> {
         self.channels.lock().await.insert(channel.id(), channel);
         reply.accept().await;
+        Ok(())
+    }
+
+    /// Emulates the client's remote barrier loop: prints the ready line,
+    /// then answers `ok` to every request line (a no-op "sync").
+    async fn exec_request(
+        &mut self,
+        channel_id: ChannelId,
+        _command: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let channel = self.channels.lock().await.remove(&channel_id);
+        let (true, Some(mut channel)) = (self.allow_exec, channel) else {
+            session.channel_failure(channel_id)?;
+            return Ok(());
+        };
+        session.channel_success(channel_id)?;
+        let syncs = Arc::clone(&self.syncs);
+        tokio::spawn(async move {
+            if channel.data(&b"rbackup-barrier-ready\n"[..]).await.is_err() {
+                return;
+            }
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    russh::ChannelMsg::Data { data } => {
+                        for _ in data.iter().filter(|&&b| b == b'\n') {
+                            syncs.fetch_add(1, Ordering::SeqCst);
+                            if channel.data(&b"ok\n"[..]).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    russh::ChannelMsg::Eof | russh::ChannelMsg::Close => return,
+                    _ => {}
+                }
+            }
+        });
         Ok(())
     }
 
@@ -408,6 +455,16 @@ impl russh_sftp::server::Handler for FsSftp {
 
 /// Spawns the test server on a free localhost port; returns (port, root).
 fn spawn_server(expected_public: ssh_key::PublicKey) -> (u16, PathBuf) {
+    let (port, root, _syncs) = spawn_server_with(expected_public, true);
+    (port, root)
+}
+
+/// Like [`spawn_server`], choosing whether exec (the sync barrier) is
+/// allowed; also returns the served-sync counter.
+fn spawn_server_with(
+    expected_public: ssh_key::PublicKey,
+    allow_exec: bool,
+) -> (u16, PathBuf, Arc<AtomicUsize>) {
     let root = std::env::temp_dir().join(format!("rb-sftp-root-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("root dir");
 
@@ -415,9 +472,12 @@ fn spawn_server(expected_public: ssh_key::PublicKey) -> (u16, PathBuf) {
     let port = listener.local_addr().expect("addr").port();
     drop(listener);
 
+    let syncs = Arc::new(AtomicUsize::new(0));
     let server = TestSshServer {
         expected_public,
         fs_root: root.clone(),
+        allow_exec,
+        syncs: Arc::clone(&syncs),
     };
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -439,7 +499,7 @@ fn spawn_server(expected_public: ssh_key::PublicKey) -> (u16, PathBuf) {
                 .expect("server run");
         });
     });
-    (port, root)
+    (port, root, syncs)
 }
 
 /// Adapter exposing rand 0.9 randomness as ssh-key's rand_core RNG.
@@ -499,10 +559,30 @@ fn connect_params(port: u16, key_path: &Path, passphrase: Option<String>) -> Sft
     }
 }
 
+/// Files under `dir` whose name carries a temp suffix (`.tmp-`).
+fn temp_files_under(dir: &Path) -> usize {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file() && e.file_name().to_string_lossy().contains(".tmp-"))
+        .count()
+}
+
 #[test]
 fn sftp_backup_verify_restore_roundtrip() {
+    roundtrip(true);
+}
+
+#[test]
+fn sftp_roundtrip_without_exec_falls_back_to_per_chunk_fsync() {
+    roundtrip(false);
+}
+
+/// Full backup, dedup rerun, full verify and restore over SFTP, with the
+/// batched sync barrier (`allow_exec`) or the per-chunk fsync fallback.
+fn roundtrip(allow_exec: bool) {
     let (key_path, public) = write_key_file(None);
-    let (port, server_root) = spawn_server(public);
+    let (port, server_root, syncs) = spawn_server_with(public, allow_exec);
 
     let base = std::env::temp_dir().join(format!("rb-sftp-it-{}", Uuid::new_v4()));
     let source = base.join("src");
@@ -512,6 +592,14 @@ fn sftp_backup_verify_restore_roundtrip() {
 
     let backend = SftpBackend::connect(&connect_params(port, &key_path, None)).expect("connect");
     assert_eq!(backend.kind(), "sftp");
+    assert_eq!(
+        backend.chunk_durability(),
+        if allow_exec {
+            "batched-sync"
+        } else {
+            "per-chunk-fsync"
+        }
+    );
 
     let repo = Repository::init(
         Arc::new(backend.clone()),
@@ -566,6 +654,12 @@ fn sftp_backup_verify_restore_roundtrip() {
         .filter(|e| e.file_type().is_file())
         .count();
     assert_eq!(chunk_count as u64, stats.chunks_new, "chunks on server");
+    assert_eq!(temp_files_under(&repo_dir), 0, "no temp file left behind");
+    if allow_exec {
+        assert!(syncs.load(Ordering::SeqCst) >= 1, "barrier sync used");
+    } else {
+        assert_eq!(syncs.load(Ordering::SeqCst), 0);
+    }
 
     // Second run: zero new chunks (dedup over SFTP).
     let (_m2, s2) =
@@ -666,4 +760,70 @@ fn sftp_host_key_tofu_pins_and_detects_changes() {
     std::fs::write(&known_hosts, tampered).expect("write known_hosts");
     let err = SftpBackend::connect(&params).unwrap_err();
     assert!(err.to_string().contains("known_hosts"), "got: {err}");
+}
+
+#[test]
+fn sftp_batched_durability_flushes_full_batches_mid_run() {
+    // More chunks than one writer's batch (256): forces barrier + rename
+    // batches during the run, not only at finish.
+    let (key_path, public) = write_key_file(None);
+    let (port, server_root, syncs) = spawn_server_with(public, true);
+    let base = std::env::temp_dir().join(format!("rb-sftp-batch-{}", Uuid::new_v4()));
+    let source = base.join("src");
+    std::fs::create_dir_all(&source).expect("src");
+    for i in 0..1200_u64 {
+        std::fs::write(
+            source.join(format!("f{i:04}.bin")),
+            random_bytes(300, 2 * i + 1),
+        )
+        .expect("small file");
+    }
+
+    let params = connect_params(port, &key_path, None);
+    let backend = SftpBackend::connect(&params).expect("connect");
+    let repo = Repository::init(
+        Arc::new(backend.clone()),
+        "batch passphrase",
+        ChunkerConfig::default(),
+        3,
+        fast_kdf(),
+    )
+    .expect("init");
+    let job = JobConfig {
+        id: Uuid::new_v4(),
+        name: "batch-job".into(),
+        sources: vec![source.clone()],
+        destination: Destination::Sftp {
+            host: "127.0.0.1".into(),
+            port,
+            username: "tester".into(),
+            key_path: key_path.clone(),
+            remote_root: params.remote_root.clone(),
+        },
+        compression_level: 3,
+        excludes: vec![],
+        max_incrementals: 10,
+        created_at: chrono::Utc::now(),
+    };
+    let (manifest, stats) =
+        run_backup(&repo, &job, &BackupOptions::default(), |_| Ok(())).expect("backup");
+    assert_eq!(manifest.file_count(), 1200);
+    assert_eq!(stats.chunks_new, 1200);
+
+    let repo_dir = server_root.join(params.remote_root.trim_start_matches('/'));
+    assert_eq!(
+        temp_files_under(&repo_dir),
+        0,
+        "every chunk renamed into place"
+    );
+    // At least one mid-run batch per writer on top of the final barriers.
+    assert!(
+        syncs.load(Ordering::SeqCst) >= 5,
+        "syncs: {}",
+        syncs.load(Ordering::SeqCst)
+    );
+
+    let report = verify(&repo, VerifyMode::Full, None, |_, _| Ok(())).expect("verify");
+    assert!(report.ok(), "issues: {:?}", report.issues);
+    backend.close().ok();
 }

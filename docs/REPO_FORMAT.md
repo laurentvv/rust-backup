@@ -82,6 +82,7 @@ Associated data = `"RBSN" ‖ snapshot-uuid ‖ plain_len`. The JSON manifest (`
 - **Write order of a backup run** (v2): (1) every pack durable (writers `finish()`), (2) ONE index file, atomic and durable, (3) the snapshot manifest, last. A durable index therefore never points at a missing pack, and a snapshot never refers to a chunk the index cannot find. A crash after (1) leaves unindexed packs (invisible to readers, reported by `verify`, deleted by `prune`, their chunks re-stored by the next run); a crash after (2) leaves an index of valid packs and no snapshot.
 - Snapshots: the manifest is created only after every chunk of the run is stored and indexed, then atomically renamed — an interrupted run leaves unreferenced chunks (harmless, reused later) but **never** a complete-looking snapshot.
 - The SFTP batched-durability description above applies to packs (the unit of `write_new` in v2) exactly as it did to loose chunks.
+- **Restore reads and durability**: restore fetches packed chunks through a shared read-ahead cache (one range read of ~4 MiB per window, at most 8 windows; chunks not fully inside a window fall back to an exact range read; every chunk is still MAC-verified and BLAKE3-checked), and restores files with a small worker pool (`RBACKUP_RESTORE_WORKERS`, default 4, 1..=16). Restored files are written to a temp name and atomically renamed but NOT fsynced: a restore is repeatable from the repository, so per-file durability is not required.
 
 ## Paths
 

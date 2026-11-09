@@ -499,3 +499,156 @@ fn p8_full_verify_detects_blob_corruption_trailer_damage_and_index_drift() {
     );
     cleanup(&env3);
 }
+
+/// Backend wrapper counting `read_range` calls.
+struct CountingBackend {
+    inner: LocalFs,
+    ranges: std::sync::atomic::AtomicUsize,
+}
+
+impl StorageBackend for CountingBackend {
+    fn open_writer(&self) -> rb_core::Result<Box<dyn ChunkWriter>> {
+        self.inner.open_writer()
+    }
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn read(&self, rel: &str) -> rb_core::Result<Vec<u8>> {
+        self.inner.read(rel)
+    }
+    fn read_range(&self, rel: &str, offset: u64, len: u64) -> rb_core::Result<Vec<u8>> {
+        self.ranges
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.read_range(rel, offset, len)
+    }
+    fn write_atomic(&self, rel: &str, data: &[u8]) -> rb_core::Result<()> {
+        self.inner.write_atomic(rel, data)
+    }
+    fn exists(&self, rel: &str) -> rb_core::Result<bool> {
+        self.inner.exists(rel)
+    }
+    fn list(&self, dir: &str) -> rb_core::Result<Vec<String>> {
+        self.inner.list(dir)
+    }
+    fn remove(&self, rel: &str) -> rb_core::Result<()> {
+        self.inner.remove(rel)
+    }
+    fn mkdirs(&self, rel: &str) -> rb_core::Result<()> {
+        self.inner.mkdirs(rel)
+    }
+}
+
+fn restore_leftovers(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.to_string_lossy().contains(".rbrestore-") {
+                found.push(p);
+            }
+        }
+    }
+    found
+}
+
+/// Restore of ~600 small packed files with several workers is byte
+/// identical and needs far fewer backend range reads than chunks.
+#[test]
+fn restore_many_small_files_uses_read_ahead_windows() {
+    let env = env("window");
+    let source = source_dir(&env, "src");
+    std::fs::create_dir_all(source.join("d")).expect("d");
+    let mut expected = Vec::new();
+    for i in 0u64..600 {
+        let rel = if i % 2 == 0 {
+            format!("f{i:04}.bin")
+        } else {
+            format!("d/f{i:04}.bin")
+        };
+        let data = random_bytes(1500 + (i as usize % 11), i + 1);
+        std::fs::write(source.join(&rel), &data).expect("file");
+        expected.push((rel, data));
+    }
+    let (manifest, _) = run(&env.repo, &job(&env, "w", &source));
+    let chunks: usize = manifest
+        .sources
+        .iter()
+        .flat_map(|s| &s.entries)
+        .map(|e| e.chunks.len())
+        .sum();
+    assert!(chunks >= 600);
+
+    let backend = Arc::new(CountingBackend {
+        inner: LocalFs::new(&env.dest),
+        ranges: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let repo = Repository::open(backend.clone(), PASS).expect("open");
+    let target = env.base.join("out");
+    let stats = restore_to(&repo, &manifest, &source, "", &target).expect("restore");
+    assert_eq!(stats.files_restored, 600);
+    let calls = backend.ranges.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        calls <= chunks / 10,
+        "{calls} range reads for {chunks} chunks"
+    );
+    let root = target.join("src");
+    for (rel, data) in &expected {
+        assert_eq!(&std::fs::read(root.join(rel)).expect("restored"), data);
+    }
+    assert!(restore_leftovers(&target).is_empty());
+    cleanup(&env);
+}
+
+/// A restore cancelled mid-run reports `Cancelled` and leaves no temp file.
+#[test]
+fn cancelled_restore_leaves_no_temp_files() {
+    let env = env("cancel");
+    let source = source_dir(&env, "src");
+    for i in 0u64..200 {
+        std::fs::write(
+            source.join(format!("f{i:03}.bin")),
+            random_bytes(2000, i + 1),
+        )
+        .expect("file");
+    }
+    let (manifest, _) = run(&env.repo, &job(&env, "c", &source));
+    let target = env.base.join("out");
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let options = RestoreOptions {
+        cancel: Some(Arc::clone(&cancel)),
+        ..RestoreOptions::default()
+    };
+    let mut seen = 0;
+    let result = restore(
+        &env.repo,
+        &manifest.id,
+        &[RestoreSelection {
+            source_root: source.clone(),
+            rel_path: PathBuf::new(),
+        }],
+        &RestoreDestination::Target(target.clone()),
+        &options,
+        |_| {
+            seen += 1;
+            if seen == 20 {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(())
+        },
+    );
+    assert!(
+        matches!(result, Err(rb_core::Error::Cancelled)),
+        "{result:?}"
+    );
+    assert!(restore_leftovers(&target).is_empty());
+    cleanup(&env);
+}

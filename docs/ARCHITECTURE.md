@@ -13,7 +13,7 @@ rust-backup (GUI bin, GPUI Kit 0.9.0)
 │   ├── repo.rs         repository format v1 (config/keys/chunks/snapshots)
 │   ├── manifest.rs     SnapshotManifest (sources, entries, chunk refs, skipped)
 │   ├── backup.rs       walk → chunk → dedup → store → manifest LAST
-│   ├── restore.rs      plan → stream chunks (re-hashed) → atomic files → mtime
+│   ├── restore.rs      plan → stream chunks (re-hashed, pack read-ahead windows) → atomic files (no per-file fsync) → mtime
 │   ├── verify.rs       quick/full integrity pass + orphans
 │   └── catalog.rs      DuckDB migrations + jobs/runs/snapshots/verify CRUD
 └── crates/rb-cli       rbackup: headless driver of the same engine

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use uuid::Uuid;
 
@@ -116,7 +116,10 @@ pub fn restore(
     let plan = build_plan(&manifest, selection, destination)?;
 
     let mut stats = RestoreStats::default();
-    for (_source, entry, dest) in &plan {
+    // Directories first, sequentially and in plan order; symlinks are
+    // recorded as skipped. Files are then restored by a worker pool.
+    let mut file_jobs: Vec<usize> = Vec::new();
+    for (idx, (_source, entry, dest)) in plan.iter().enumerate() {
         if is_cancelled(&options.cancel) {
             return Err(crate::Error::Cancelled);
         }
@@ -134,34 +137,145 @@ pub fn restore(
                     reason: "symlink recreation not supported yet".into(),
                 })?;
             }
-            EntryKind::File => {
-                if dest.exists() && options.overwrite == OverwritePolicy::Skip {
-                    stats.files_skipped += 1;
-                    on_event(RestoreEvent::FileSkipped {
-                        dest: dest.clone(),
-                        reason: "already exists (skip policy)".into(),
-                    })?;
-                    continue;
-                }
-                on_event(RestoreEvent::FileStarted {
-                    dest: dest.clone(),
-                    size: entry.size,
-                })?;
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                restore_file(repo, &entry.chunks, dest)?;
-                set_mtime(dest, entry.mtime_ns);
-                stats.files_restored += 1;
-                stats.bytes_restored += entry.size;
-                on_event(RestoreEvent::FileDone {
-                    dest: dest.clone(),
-                    bytes: entry.size,
-                })?;
-            }
+            EntryKind::File => file_jobs.push(idx),
         }
     }
-    Ok(stats)
+    if file_jobs.is_empty() {
+        return Ok(stats);
+    }
+
+    let workers = restore_workers().min(file_jobs.len());
+    let abort = AtomicBool::new(false);
+    let stop = || abort.load(Ordering::Relaxed) || is_cancelled(&options.cancel);
+    let (job_tx, job_rx) = flume::unbounded::<usize>();
+    let (msg_tx, msg_rx) = flume::unbounded::<Msg>();
+    let total = file_jobs.len();
+    for idx in file_jobs {
+        // Receiver is alive: cannot fail.
+        let _ = job_tx.send(idx);
+    }
+    drop(job_tx);
+
+    let mut first_error: Option<crate::Error> = None;
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let job_rx = job_rx.clone();
+            let msg_tx = msg_tx.clone();
+            let plan = &plan;
+            let stop = &stop;
+            scope.spawn(move || {
+                while let Ok(idx) = job_rx.recv() {
+                    if stop() {
+                        let _ = msg_tx.send(Msg::Failed(crate::Error::Cancelled));
+                        return;
+                    }
+                    let (_source, entry, dest) = &plan[idx];
+                    let outcome = restore_one(repo, entry, dest, options, stop, || {
+                        let _ = msg_tx.send(Msg::Started(idx));
+                    });
+                    let msg = match outcome {
+                        Ok(true) => Msg::Done(idx),
+                        Ok(false) => Msg::Skipped(idx),
+                        Err(e) => Msg::Failed(e),
+                    };
+                    let failed = matches!(msg, Msg::Failed(_));
+                    let _ = msg_tx.send(msg);
+                    if failed {
+                        return;
+                    }
+                }
+            });
+        }
+        drop(msg_tx);
+
+        let mut finished = 0usize;
+        while finished < total {
+            // All workers gone without finishing: an error was reported.
+            let Ok(msg) = msg_rx.recv() else { break };
+            let result = match msg {
+                Msg::Started(idx) => {
+                    let (_, entry, dest) = &plan[idx];
+                    on_event(RestoreEvent::FileStarted {
+                        dest: dest.clone(),
+                        size: entry.size,
+                    })
+                }
+                Msg::Skipped(idx) => {
+                    finished += 1;
+                    stats.files_skipped += 1;
+                    on_event(RestoreEvent::FileSkipped {
+                        dest: plan[idx].2.clone(),
+                        reason: "already exists (skip policy)".into(),
+                    })
+                }
+                Msg::Done(idx) => {
+                    finished += 1;
+                    let (_, entry, dest) = &plan[idx];
+                    stats.files_restored += 1;
+                    stats.bytes_restored += entry.size;
+                    on_event(RestoreEvent::FileDone {
+                        dest: dest.clone(),
+                        bytes: entry.size,
+                    })
+                }
+                Msg::Failed(e) => Err(e),
+            };
+            if let Err(e) = result {
+                // Keep the first error; a Cancelled echo from a worker must
+                // not mask the real cause.
+                first_error.get_or_insert(e);
+                abort.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+        abort.store(true, Ordering::Relaxed);
+    });
+    match first_error {
+        Some(e) => Err(e),
+        None if is_cancelled(&options.cancel) => Err(crate::Error::Cancelled),
+        None => Ok(stats),
+    }
+}
+
+/// Worker-to-caller progress messages (events stay on the caller thread).
+enum Msg {
+    Started(usize),
+    Skipped(usize),
+    Done(usize),
+    Failed(crate::Error),
+}
+
+/// Default number of restore worker threads.
+const DEFAULT_RESTORE_WORKERS: usize = 4;
+/// Environment override of the restore worker count (clamped to 1..=16).
+pub const RESTORE_WORKERS_ENV: &str = "RBACKUP_RESTORE_WORKERS";
+
+fn restore_workers() -> usize {
+    std::env::var(RESTORE_WORKERS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map_or(DEFAULT_RESTORE_WORKERS, |n| n.clamp(1, 16))
+}
+
+/// Restores one file entry; `Ok(false)` means skipped (exists + skip policy).
+fn restore_one(
+    repo: &Repository,
+    entry: &FileEntry,
+    dest: &Path,
+    options: &RestoreOptions,
+    stop: &dyn Fn() -> bool,
+    started: impl FnOnce(),
+) -> crate::Result<bool> {
+    if dest.exists() && options.overwrite == OverwritePolicy::Skip {
+        return Ok(false);
+    }
+    started();
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    restore_file(repo, &entry.chunks, dest, stop)?;
+    set_mtime(dest, entry.mtime_ns);
+    Ok(true)
 }
 
 /// The concrete work list: `(source snapshot, entry, destination path)`.
@@ -224,6 +338,7 @@ fn restore_file(
     repo: &Repository,
     chunks: &[crate::manifest::ChunkRef],
     dest: &Path,
+    stop: &dyn Fn() -> bool,
 ) -> crate::Result<()> {
     let tmp =
         TempFileGuard(dest.with_extension(format!("rbrestore-{}", uuid::Uuid::new_v4().simple())));
@@ -231,7 +346,10 @@ fn restore_file(
         use std::io::Write as _;
         let mut out = std::fs::File::create(&tmp.0)?;
         for chunk in chunks {
-            let plaintext = repo.read_chunk(&chunk.hash, chunk.plain_len)?;
+            if stop() {
+                return Err(crate::Error::Cancelled);
+            }
+            let plaintext = repo.read_chunk_windowed(&chunk.hash, chunk.plain_len)?;
             let actual = crate::hash::ChunkHash::from_data(&plaintext);
             if actual != chunk.hash {
                 return Err(crate::Error::Repo(format!(
@@ -241,7 +359,10 @@ fn restore_file(
             }
             out.write_all(&plaintext)?;
         }
-        out.sync_all()?;
+        // No `sync_all`: a restore is repeatable from the repository, so
+        // per-file durability is not worth one flush per small file. The
+        // temp file + atomic rename below still guarantees that a crash
+        // never leaves a half-written file under the final name.
     }
     // `rename` replaces an existing file atomically (Windows and POSIX):
     // an interrupted restore leaves either the old file or the new one.
@@ -291,5 +412,5 @@ fn normalize(path: &Path) -> String {
 fn is_cancelled(cancel: &Option<Arc<AtomicBool>>) -> bool {
     cancel
         .as_ref()
-        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        .is_some_and(|flag| flag.load(Ordering::Relaxed))
 }

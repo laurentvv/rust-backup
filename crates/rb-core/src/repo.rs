@@ -342,10 +342,36 @@ impl Repository {
     /// violations and [`Error::Crypto`](crate::Error::Crypto) on
     /// authentication failure.
     pub fn read_chunk(&self, hash: &ChunkHash, plain_len: u64) -> crate::Result<Vec<u8>> {
-        let located = self.pack_index()?.blobs.get(hash).cloned();
+        self.read_chunk_impl(hash, plain_len, false)
+    }
+
+    /// Like [`Self::read_chunk`], but packed chunks are served through a
+    /// shared read-ahead window cache (used by restore: consecutive chunks
+    /// of a pack cost one backend range read per ~4 MiB). Same
+    /// verification as `read_chunk`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::read_chunk`].
+    pub fn read_chunk_windowed(&self, hash: &ChunkHash, plain_len: u64) -> crate::Result<Vec<u8>> {
+        self.read_chunk_impl(hash, plain_len, true)
+    }
+
+    fn read_chunk_impl(
+        &self,
+        hash: &ChunkHash,
+        plain_len: u64,
+        windowed: bool,
+    ) -> crate::Result<Vec<u8>> {
+        let index = self.pack_index()?;
+        let located = index.blobs.get(hash).cloned();
         let blob = if let Some((pack, entry)) = located {
-            self.backend
-                .read_range(&pack_rel(&pack), entry.offset, entry.length)?
+            if windowed {
+                self.read_pack_blob_windowed(&pack, &entry, &index)?
+            } else {
+                self.backend
+                    .read_range(&pack_rel(&pack), entry.offset, entry.length)?
+            }
         } else {
             self.backend.read(&Self::chunk_rel(hash))?
         };

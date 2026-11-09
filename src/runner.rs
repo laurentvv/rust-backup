@@ -51,6 +51,20 @@ pub struct BackupSummary {
     pub stats: BackupStats,
 }
 
+/// Catalog location for the GUI: `RBACKUP_DB` when set (same role as the
+/// CLI's `--db`: a separate catalog for demos or tests), else the default.
+///
+/// # Errors
+///
+/// Returns an error when `RBACKUP_DB` is unset and the platform exposes no
+/// local app-data directory.
+pub fn catalog_path() -> rb_core::Result<std::path::PathBuf> {
+    match std::env::var_os("RBACKUP_DB").filter(|p| !p.is_empty()) {
+        Some(path) => Ok(std::path::PathBuf::from(path)),
+        None => Catalog::default_path(),
+    }
+}
+
 /// Spawns a backup run on its own thread. Returns the event stream and the
 /// cooperative cancel flag.
 pub fn spawn_backup(
@@ -94,7 +108,7 @@ impl BackupRunner {
 
         // Record the outcome in the local catalog (best effort — the
         // repository remains the source of truth).
-        if let Ok(catalog) = Catalog::default_path()
+        if let Ok(catalog) = catalog_path()
             .map_err(|e| e.to_string())
             .and_then(|p| Catalog::open(&p).map_err(|e| e.to_string()))
         {
@@ -394,7 +408,7 @@ pub fn spawn_verify(
                     Ok(())
                 })
                 .map_err(|e| e.to_string())?;
-            if let Ok(catalog) = Catalog::default_path()
+            if let Ok(catalog) = catalog_path()
                 .map_err(|e| e.to_string())
                 .and_then(|p| Catalog::open(&p).map_err(|e| e.to_string()))
             {
@@ -454,7 +468,7 @@ pub fn spawn_delete_snapshot(
     std::thread::spawn(move || {
         let result = (|| {
             delete_snapshot_in_repo(&job, &passphrase, &snapshot_id)?;
-            if let Ok(catalog) = Catalog::default_path()
+            if let Ok(catalog) = catalog_path()
                 .map_err(|e| e.to_string())
                 .and_then(|p| Catalog::open(&p).map_err(|e| e.to_string()))
             {

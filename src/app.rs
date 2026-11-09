@@ -232,10 +232,11 @@ fn build_restore_tree(entries: &[(String, String, u64)], search: &str) -> (Resto
             let mut prefix = String::new();
             for (idx, part) in parts.iter().enumerate() {
                 if idx == parts.len() - 1 {
+                    // Counted in `all_files`/`total_size` already, when the
+                    // loop entered this directory (counting it again here
+                    // doubled the totals of every folder's direct files).
                     curr.files
                         .push((rel_norm.clone(), (*part).to_string(), *size));
-                    curr.all_files.push(rel_norm.clone());
-                    curr.total_size += size;
                 } else {
                     if !prefix.is_empty() {
                         prefix.push('/');
@@ -350,8 +351,9 @@ impl RustBackupApp {
         self.lang.texts()
     }
 
+    /// Catalog location (`RBACKUP_DB` override, see [`runner::catalog_path`]).
     fn catalog_path(&self) -> Option<std::path::PathBuf> {
-        Catalog::default_path().ok()
+        runner::catalog_path().ok()
     }
 
     /// Reloads jobs, recent runs and aggregate stats from the local catalog.
@@ -1140,7 +1142,7 @@ impl RustBackupApp {
         job_id: JobId,
     ) {
         let t = self.texts();
-        let outcome = Catalog::default_path()
+        let outcome = runner::catalog_path()
             .and_then(|path| Catalog::open(&path))
             .and_then(|catalog| catalog.delete_job(job_id));
         match outcome {
@@ -3824,5 +3826,29 @@ impl gpui::Render for RustBackupApp {
                         ),
                 ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_restore_tree;
+
+    #[test]
+    fn restore_tree_counts_each_file_once_per_ancestor() {
+        let entries = vec![
+            ("src".to_owned(), "a/x.bin".to_owned(), 10),
+            ("src".to_owned(), "a/b/y.bin".to_owned(), 5),
+            ("src".to_owned(), "top.bin".to_owned(), 1),
+        ];
+        let (root, matching) = build_restore_tree(&entries, "");
+        assert_eq!(matching, 3);
+        let a = &root.subdirs["a"];
+        assert_eq!(a.all_files.len(), 2, "{:?}", a.all_files);
+        assert_eq!(a.total_size, 15);
+        assert_eq!(a.files.len(), 1);
+        let b = &a.subdirs["b"];
+        assert_eq!(b.all_files, vec!["a/b/y.bin".to_owned()]);
+        assert_eq!(b.total_size, 5);
+        assert_eq!(root.files.len(), 1);
     }
 }

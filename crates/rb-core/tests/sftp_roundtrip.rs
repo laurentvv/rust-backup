@@ -694,6 +694,34 @@ fn roundtrip(allow_exec: bool) {
 }
 
 #[test]
+fn sftp_read_range_reads_only_requested_bytes_and_errors_on_short_file() {
+    let (key_path, public) = write_key_file(None);
+    let (port, _root, _syncs) = spawn_server_with(public, true);
+    let backend = SftpBackend::connect(&connect_params(port, &key_path, None)).expect("connect");
+    let data = random_bytes(300_000, 9);
+    backend
+        .write_atomic("packs/ab/r.pack", &data)
+        .expect("write");
+    assert_eq!(
+        backend
+            .read_range("packs/ab/r.pack", 1_000, 70_000)
+            .expect("range"),
+        &data[1_000..71_000]
+    );
+    assert_eq!(
+        backend
+            .read_range("packs/ab/r.pack", 299_990, 10)
+            .expect("tail"),
+        &data[299_990..]
+    );
+    assert!(
+        backend.read_range("packs/ab/r.pack", 299_990, 11).is_err(),
+        "range past the end of the file must error"
+    );
+    backend.close().ok();
+}
+
+#[test]
 fn sftp_wrong_public_key_is_rejected() {
     let (_good_key, good_public) = write_key_file(None);
     let (port, _root) = spawn_server(good_public);

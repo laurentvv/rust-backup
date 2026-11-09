@@ -510,6 +510,9 @@ impl StorageBackend for FailingBackend {
     fn read(&self, rel: &str) -> rb_core::Result<Vec<u8>> {
         self.inner.read(rel)
     }
+    fn read_range(&self, rel: &str, offset: u64, len: u64) -> rb_core::Result<Vec<u8>> {
+        self.inner.read_range(rel, offset, len)
+    }
     fn write_atomic(&self, rel: &str, data: &[u8]) -> rb_core::Result<()> {
         self.inner.write_atomic(rel, data)
     }

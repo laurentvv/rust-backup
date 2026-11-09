@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use russh_sftp::client::SftpSession;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::{ChunkWriter, StorageBackend};
 
@@ -163,6 +163,22 @@ impl StorageBackend for SftpBackend {
                 .await?;
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
+            file.shutdown().await?;
+            Ok(buf)
+        })
+    }
+
+    fn read_range(&self, rel: &str, offset: u64, len: u64) -> crate::Result<Vec<u8>> {
+        let path = self.remote_path(rel);
+        let sftp = Arc::clone(&self.sftp);
+        let len = usize::try_from(len).map_err(std::io::Error::other)?;
+        self.runtime.block_on(async move {
+            let mut file = sftp
+                .open_with_flags(&path, russh_sftp::protocol::OpenFlags::READ)
+                .await?;
+            file.seek(std::io::SeekFrom::Start(offset)).await?;
+            let mut buf = vec![0u8; len];
+            file.read_exact(&mut buf).await?;
             file.shutdown().await?;
             Ok(buf)
         })

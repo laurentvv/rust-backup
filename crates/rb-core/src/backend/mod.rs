@@ -42,6 +42,15 @@ pub trait StorageBackend: Send + Sync {
     /// unreadable.
     fn read(&self, rel: &str) -> crate::Result<Vec<u8>>;
 
+    /// Reads exactly `len` bytes of a repository file starting at `offset`
+    /// (pack blob reads: only the needed byte range crosses the wire).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`](crate::Error::Io) when the file is missing or
+    /// shorter than `offset + len` (a short file is never silently padded).
+    fn read_range(&self, rel: &str, offset: u64, len: u64) -> crate::Result<Vec<u8>>;
+
     /// Atomically and durably writes `data` at `rel`: write to a temp name in
     /// the same directory, flush it to stable storage, then rename it into
     /// place, creating parent directories as needed. On failure the temp file

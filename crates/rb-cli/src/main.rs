@@ -435,9 +435,7 @@ fn main() -> anyhow::Result<()> {
             };
 
             let t0 = std::time::Instant::now();
-            let mut last_progress = std::time::Instant::now();
-            let (mut files_total, mut bytes_total) = (0u64, 0u64);
-            let (mut files_done, mut bytes_done) = (0u64, 0u64);
+            let mut progress = RestoreProgress::new();
             let result = rb_core::restore::restore(
                 &repo,
                 &snapshot,
@@ -445,50 +443,23 @@ fn main() -> anyhow::Result<()> {
                 &destination,
                 &options,
                 |event| {
-                    match event {
-                        rb_core::restore::RestoreEvent::Planned { files, bytes } => {
-                            files_total = files;
-                            bytes_total = bytes;
-                        }
-                        rb_core::restore::RestoreEvent::BytesWritten { bytes } => {
-                            bytes_done += bytes;
-                        }
-                        rb_core::restore::RestoreEvent::FileDone { .. } => files_done += 1,
-                        rb_core::restore::RestoreEvent::FileSkipped { dest, reason } => {
-                            eprintln!(
-                                "
-skipped: {} ({reason})",
-                                dest.display()
-                            );
-                        }
-                        rb_core::restore::RestoreEvent::FileStarted { .. } => {}
-                    }
-                    if last_progress.elapsed() >= std::time::Duration::from_millis(250) {
-                        last_progress = std::time::Instant::now();
-                        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
-                        let secs = t0.elapsed().as_secs_f64().max(0.001);
-                        eprint!(
-                            "\r  {files_done}/{files_total} files | {:>8.1}/{:.1} MiB | {:>6.2} MiB/s  ",
-                            mib(bytes_done),
-                            mib(bytes_total),
-                            mib(bytes_done) / secs
-                        );
-                        use std::io::Write as _;
-                        let _ = std::io::stderr().flush();
-                    }
+                    progress.on_event(event);
                     Ok(())
                 },
             );
-            // Terminate the progress line (both on success and failure).
+            // Final progress line, then terminate it (success and failure).
+            progress.print();
             eprintln!();
             let stats = result.map_err(|e| anyhow::anyhow!(e))?;
             println!(
-                "restored: {} files ({} bytes), {} skipped, {} directories created in {:.1} s",
+                "restored: {} files ({:.1} MiB), {} already present (skipped), {} other skipped, \
+                 {} directories created in {}",
                 stats.files_restored,
-                stats.bytes_restored,
-                stats.files_skipped,
+                mib(stats.bytes_restored),
+                progress.existing,
+                stats.files_skipped.saturating_sub(progress.existing),
                 stats.dirs_created,
-                t0.elapsed().as_secs_f64()
+                format_duration(t0.elapsed().as_secs_f64())
             );
         }
         Command::Verify { job, full } => {
@@ -771,4 +742,133 @@ fn run_job(
 /// Current UTC timestamp (kept in one place for testability later).
 fn chrono_now() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
+}
+
+fn mib(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+/// `1h02m03s`, `4m05s` or `6s`.
+fn format_duration(secs: f64) -> String {
+    let total = secs.max(0.0).round() as u64;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m{s:02}s")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Restore progress line: files and MiB done, files/s, MiB/s and an ETA.
+///
+/// Files already present at the destination (skip policy) are only counted,
+/// not printed one by one; other skips (symlinks) are printed.
+struct RestoreProgress {
+    /// Set when the restore plan is known (after the skip pre-check), so the
+    /// rates only cover actual restore work.
+    started: Option<std::time::Instant>,
+    last_print: std::time::Instant,
+    files_total: u64,
+    bytes_total: u64,
+    files_done: u64,
+    bytes_done: u64,
+    /// Files skipped because they already exist.
+    existing: u64,
+}
+
+impl RestoreProgress {
+    fn new() -> Self {
+        Self {
+            started: None,
+            last_print: std::time::Instant::now(),
+            files_total: 0,
+            bytes_total: 0,
+            files_done: 0,
+            bytes_done: 0,
+            existing: 0,
+        }
+    }
+
+    fn on_event(&mut self, event: rb_core::restore::RestoreEvent) {
+        use rb_core::restore::RestoreEvent;
+        match event {
+            RestoreEvent::Planned { files, bytes } => {
+                self.files_total = files;
+                self.bytes_total = bytes;
+                self.started = Some(std::time::Instant::now());
+                if self.existing > 0 {
+                    eprintln!(
+                        "\r  {} files already present at the destination: kept, not restored",
+                        self.existing
+                    );
+                }
+            }
+            RestoreEvent::BytesWritten { bytes } => self.bytes_done += bytes,
+            RestoreEvent::FileDone { .. } => self.files_done += 1,
+            RestoreEvent::FileSkipped { dest, reason } => {
+                if reason.starts_with("already exists") {
+                    self.existing += 1;
+                } else {
+                    eprintln!("\rskipped: {} ({reason})", dest.display());
+                }
+            }
+            RestoreEvent::FileStarted { .. } => {}
+        }
+        if self.last_print.elapsed() >= std::time::Duration::from_millis(250) {
+            self.last_print = std::time::Instant::now();
+            self.print();
+        }
+    }
+
+    fn print(&self) {
+        use std::io::Write as _;
+        let Some(started) = self.started else {
+            eprint!(
+                "\r  checking destination: {} files already present  ",
+                self.existing
+            );
+            let _ = std::io::stderr().flush();
+            return;
+        };
+        let secs = started.elapsed().as_secs_f64().max(0.001);
+        let files_rate = self.files_done as f64 / secs;
+        let bytes_rate = self.bytes_done as f64 / secs;
+        // Small files are bound by per-file cost, big ones by bandwidth:
+        // the larger of the two remaining-time estimates is the honest one.
+        let eta_files = (self.files_total.saturating_sub(self.files_done)) as f64 / files_rate;
+        let eta_bytes = (self.bytes_total.saturating_sub(self.bytes_done)) as f64 / bytes_rate;
+        let eta = eta_files.max(eta_bytes);
+        let eta = if self.files_done == 0 || !eta.is_finite() {
+            "--".to_owned()
+        } else {
+            format_duration(eta)
+        };
+        eprint!(
+            "\r  {}/{} files | {:.1}/{:.1} MiB | {:.0} files/s | {:.2} MiB/s | {} elapsed | ETA {}  ",
+            self.files_done,
+            self.files_total,
+            mib(self.bytes_done),
+            mib(self.bytes_total),
+            files_rate,
+            mib(self.bytes_done) / secs,
+            format_duration(secs),
+            eta
+        );
+        let _ = std::io::stderr().flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_duration;
+
+    #[test]
+    fn format_duration_picks_the_largest_unit() {
+        assert_eq!(format_duration(6.2), "6s");
+        assert_eq!(format_duration(245.0), "4m05s");
+        assert_eq!(format_duration(3723.0), "1h02m03s");
+        assert_eq!(format_duration(-1.0), "0s");
+    }
 }

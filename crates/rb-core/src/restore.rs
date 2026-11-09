@@ -269,10 +269,12 @@ pub fn restore(
         }
         drop(msg_tx);
 
+        // Drain until every worker has exited (the channel closes when the
+        // last sender drops), not just until the last file is done: a
+        // worker sends the byte count of a batch AFTER the files it
+        // completed, and those trailing messages must still be reported.
         let mut finished = 0usize;
-        while finished < total_files {
-            // All workers gone without finishing: an error was reported.
-            let Ok(msg) = msg_rx.recv() else { break };
+        while let Ok(msg) = msg_rx.recv() {
             let result = match msg {
                 Msg::Started(slot) => {
                     let (_, entry, dest) = &plan[slot_plan[slot]];
@@ -301,6 +303,13 @@ pub fn restore(
                 abort.store(true, Ordering::Relaxed);
                 break;
             }
+        }
+        // Every worker exited cleanly but some files never completed: never
+        // report that as a success.
+        if first_error.is_none() && finished < total_files && !is_cancelled(&options.cancel) {
+            first_error = Some(crate::Error::Repo(format!(
+                "restore stopped with {finished} of {total_files} files written"
+            )));
         }
         abort.store(true, Ordering::Relaxed);
     });

@@ -24,7 +24,7 @@ use rb_core::backup::BackupEvent;
 use rb_core::catalog::Catalog;
 use rb_core::domain::{Destination, JobConfig, JobId, RunRecord, RunStatus};
 
-use crate::i18n::{self, Lang, human_bytes_lang};
+use crate::i18n::{self, Lang, format_eta, human_bytes_lang};
 use crate::runner::{self, EngineEvent};
 use crate::theme;
 
@@ -154,6 +154,8 @@ pub struct RustBackupApp {
     restore_files_total: u64,
     restore_bytes_done: u64,
     restore_bytes_total: u64,
+    /// When the restore plan was known (rates and remaining time start here).
+    restore_started: Option<std::time::Instant>,
     restore_current_file: String,
     restore_view_tree: bool,
     expanded_folders: std::collections::BTreeSet<String>,
@@ -322,6 +324,7 @@ impl RustBackupApp {
             restore_files_total: 0,
             restore_bytes_done: 0,
             restore_bytes_total: 0,
+            restore_started: None,
             restore_current_file: String::new(),
             restore_view_tree: true,
             expanded_folders: std::collections::BTreeSet::new(),
@@ -633,6 +636,7 @@ impl RustBackupApp {
         self.restore_files_total = self.selected_paths.len() as u64;
         self.restore_bytes_done = 0;
         self.restore_bytes_total = total_bytes;
+        self.restore_started = None;
         self.restore_current_file = String::new();
         cx.notify();
 
@@ -647,6 +651,7 @@ impl RustBackupApp {
         self.restore_cancel = Some(cancel);
 
         cx.spawn(async move |this, cx| {
+            let mut last_redraw = std::time::Instant::now();
             while let Ok(event) = rx.recv_async().await {
                 let Ok(()) = this.update(cx, |app, _cx| match event {
                     runner::RestoreEvent::Progress(
@@ -657,23 +662,35 @@ impl RustBackupApp {
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| dest.display().to_string());
                     }
+                    // Bytes come from `BytesWritten` (intra-file progress), so
+                    // `FileDone` only counts the file.
                     runner::RestoreEvent::Progress(rb_core::restore::RestoreEvent::FileDone {
-                        bytes,
                         ..
                     }) => {
                         app.restore_files_done += 1;
-                        app.restore_bytes_done += bytes;
                     }
                     runner::RestoreEvent::Progress(
                         rb_core::restore::RestoreEvent::FileSkipped { .. },
                     ) => {
                         app.restore_files_done += 1;
                     }
-                    // Totals and intra-file byte progress: not shown by the GUI.
+                    // Real totals: the selection may hold directories, so
+                    // the pre-run estimate (selected items) is replaced.
+                    // Files skipped so far are already counted as done.
+                    runner::RestoreEvent::Progress(rb_core::restore::RestoreEvent::Planned {
+                        files,
+                        bytes,
+                    }) => {
+                        app.restore_files_total = files + app.restore_files_done;
+                        app.restore_bytes_total = bytes;
+                        app.restore_bytes_done = 0;
+                        app.restore_started = Some(std::time::Instant::now());
+                    }
                     runner::RestoreEvent::Progress(
-                        rb_core::restore::RestoreEvent::Planned { .. }
-                        | rb_core::restore::RestoreEvent::BytesWritten { .. },
-                    ) => {}
+                        rb_core::restore::RestoreEvent::BytesWritten { bytes },
+                    ) => {
+                        app.restore_bytes_done += bytes;
+                    }
                     runner::RestoreEvent::Finished(Ok(stats)) => {
                         app.restore_busy = false;
                         app.restore_cancel = None;
@@ -705,8 +722,14 @@ impl RustBackupApp {
                 }) else {
                     break;
                 };
-                let _ = this.update(cx, |_, cx| cx.notify());
+                // A big restore emits hundreds of thousands of events:
+                // redraw at most ~10 times per second, and always at the end.
+                if last_redraw.elapsed() >= std::time::Duration::from_millis(100) {
+                    last_redraw = std::time::Instant::now();
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
             }
+            let _ = this.update(cx, |_, cx| cx.notify());
         })
         .detach();
     }
@@ -2736,6 +2759,35 @@ impl RustBackupApp {
             } else {
                 0.0
             };
+            // Throughput and remaining time, once the plan is known. Small
+            // files are bound by per-file cost and big ones by bandwidth, so
+            // the larger of the two estimates is shown.
+            let speed = self.restore_started.and_then(|started| {
+                let secs = started.elapsed().as_secs_f64();
+                if secs < 1.0 || self.restore_bytes_done == 0 {
+                    return None;
+                }
+                let bytes_rate = self.restore_bytes_done as f64 / secs;
+                let files_rate = self.restore_files_done as f64 / secs;
+                let left_bytes =
+                    self.restore_bytes_total
+                        .saturating_sub(self.restore_bytes_done) as f64;
+                let left_files =
+                    self.restore_files_total
+                        .saturating_sub(self.restore_files_done) as f64;
+                let eta_files = if files_rate > 0.0 {
+                    left_files / files_rate
+                } else {
+                    0.0
+                };
+                let eta = (left_bytes / bytes_rate).max(eta_files);
+                Some(format!(
+                    "{}/s · {} {}",
+                    human_bytes_lang(bytes_rate as u64, self.lang),
+                    format_eta(eta),
+                    t.time_left
+                ))
+            });
             Some(
                 v_flex()
                     .gap_3()
@@ -2791,14 +2843,18 @@ impl RustBackupApp {
                                 self.restore_current_file.clone()
                             })
                             .child(if self.restore_bytes_total > 0 {
-                                format!(
+                                let base = format!(
                                     "{} / {} {} ({} / {})",
                                     self.restore_files_done,
                                     self.restore_files_total,
                                     t.files,
                                     human_bytes_lang(self.restore_bytes_done, self.lang),
                                     human_bytes_lang(self.restore_bytes_total, self.lang)
-                                )
+                                );
+                                match &speed {
+                                    Some(speed) => format!("{base} · {speed}"),
+                                    None => base,
+                                }
                             } else {
                                 format!(
                                     "{} / {} {} ({})",

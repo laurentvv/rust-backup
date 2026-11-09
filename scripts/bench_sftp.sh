@@ -28,7 +28,7 @@ MODES="${BENCH_MODES:-fsync-chan batched-chan batched-conn}"
 WORKERS="${BENCH_WORKERS:-4 8}"
 export RBACKUP_PASSPHRASE="bench-only-throwaway"
 SSH=(ssh -i "$BENCH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "$BENCH_USER@$BENCH_HOST")
-WORK="$(mktemp -d)"
+WORK="$(cygpath -m "$(mktemp -d)")"   # Windows path: the exe must not see an MSYS /tmp path
 trap 'rm -rf "$WORK"' EXIT
 
 printf '%-10s %-14s %-3s %9s %10s %9s\n' corpus mode w full_s MiB/s rerun_s

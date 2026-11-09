@@ -738,6 +738,7 @@ mod tests {
                 manifests_checked: 2,
                 chunks_checked: 9,
                 orphan_chunks: 0,
+                unindexed_packs: 0,
                 issues: vec![crate::verify::VerifyIssue {
                     message: "chunk abc is MISSING".into(),
                 }],

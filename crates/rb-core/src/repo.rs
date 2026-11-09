@@ -1,14 +1,21 @@
-//! The backup repository: on-disk format v1, self-contained on any
-//! [`StorageBackend`].
+//! The backup repository: on-disk format v2 (v1 stays readable), self-contained
+//! on any [`StorageBackend`].
 //!
 //! Layout (repo-relative paths):
-//! - `config.json` — public repository parameters (chunking, compression)
+//! - `config.json` — public repository parameters (chunking, compression);
+//!   `version` 2 for new repositories, v1 ones are upgraded on their first
+//!   pack write
 //! - `keys/<id>.json` — master key sealed under the passphrase (Argon2id)
-//! - `chunks/<2-hex>/<hash>.chunk` — sealed chunks (see below)
+//! - `chunks/<2-hex>/<hash>.chunk` — v1 loose chunks (read forever, never
+//!   written by v2 code)
+//! - `packs/<2-hex>/<pack-id>.pack` — packs of chunk blobs (see [`crate::pack`])
+//! - `index/<index-id>.idx` — sealed maps chunk hash to pack location
 //! - `snapshots/<id>.snap` — sealed snapshot manifests, written LAST
-//! - `locks/` — reserved
+//! - `locks/` — advisory lock files
 //!
-//! Chunk file layout: `RBCH` magic | version u8 | plain_len u64 LE |
+//! Write order of a backup: packs durable, then the index file, then the
+//! snapshot manifest. A chunk blob inside a pack is exactly the v1 chunk
+//! file; chunk blob layout: `RBCH` magic | version u8 | plain_len u64 LE |
 //! AES-256-GCM(nonce || zstd(plaintext) || tag), with the chunk hash and
 //! plain_len as associated data. Snapshot layout: `RBSN` magic | version
 //! u8 | plain_len u64 LE | sealed manifest, AD = snapshot id + plain_len.
@@ -24,6 +31,7 @@ use crate::chunker::ChunkerConfig;
 use crate::crypto::{ChunkCipher, EncryptedKey, KdfParams, MasterKey};
 use crate::hash::ChunkHash;
 use crate::manifest::SnapshotManifest;
+use crate::pack::pack_rel;
 
 /// Chunk blob magic.
 const CHUNK_MAGIC: &[u8; 4] = b"RBCH";
@@ -37,7 +45,7 @@ const HEADER_SIZE: usize = 13;
 /// Public repository parameters, stored in `config.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoConfig {
-    /// On-disk format version (1).
+    /// On-disk format version (1 = loose chunks, 2 = packs + index).
     pub version: u32,
     /// Chunker tuning; must stay stable for meaningful dedup.
     pub chunker: ChunkerConfig,
@@ -59,6 +67,15 @@ pub struct PruneReport {
     /// Leftover temp files (`*.tmp-*`) from interrupted writes, removed.
     #[serde(default)]
     pub temp_files_removed: u64,
+    /// Pack files deleted (fully unreferenced, repacked away, unindexed).
+    #[serde(default)]
+    pub packs_deleted: u64,
+    /// Mostly-dead packs whose live blobs were copied into new packs.
+    #[serde(default)]
+    pub packs_repacked: u64,
+    /// Consolidated index files written.
+    #[serde(default)]
+    pub index_files_rewritten: u64,
 }
 
 /// Lock information stored under `locks/<id>.json`.
@@ -134,10 +151,12 @@ impl Drop for RepositoryLock {
 /// An opened backup repository with the master key derived.
 #[derive(Clone)]
 pub struct Repository {
-    backend: std::sync::Arc<dyn StorageBackend>,
+    pub(crate) backend: std::sync::Arc<dyn StorageBackend>,
     config: RepoConfig,
-    cipher: ChunkCipher,
+    pub(crate) cipher: ChunkCipher,
     key_id: String,
+    /// Lazily loaded chunk map, shared by clones.
+    pub(crate) pack_state: std::sync::Arc<crate::pack::PackState>,
 }
 
 impl std::fmt::Debug for Repository {
@@ -179,7 +198,7 @@ impl Repository {
         )?;
 
         let config = RepoConfig {
-            version: 1,
+            version: 2,
             chunker,
             compression_level,
             created_at: Utc::now(),
@@ -196,6 +215,7 @@ impl Repository {
             config,
             cipher,
             key_id,
+            pack_state: std::sync::Arc::default(),
         })
     }
 
@@ -217,7 +237,7 @@ impl Repository {
         }
         let config: RepoConfig = serde_json::from_slice(&backend.read("config.json")?)
             .map_err(|e| crate::Error::Repo(format!("invalid config.json: {e}")))?;
-        if config.version != 1 {
+        if !(1..=2).contains(&config.version) {
             return Err(crate::Error::Repo(format!(
                 "unsupported repository version {}",
                 config.version
@@ -241,6 +261,7 @@ impl Repository {
             config,
             cipher: ChunkCipher::new(&master)?,
             key_id,
+            pack_state: std::sync::Arc::default(),
         })
     }
 
@@ -321,7 +342,13 @@ impl Repository {
     /// violations and [`Error::Crypto`](crate::Error::Crypto) on
     /// authentication failure.
     pub fn read_chunk(&self, hash: &ChunkHash, plain_len: u64) -> crate::Result<Vec<u8>> {
-        let blob = self.backend.read(&Self::chunk_rel(hash))?;
+        let located = self.pack_index()?.blobs.get(hash).cloned();
+        let blob = if let Some((pack, entry)) = located {
+            self.backend
+                .read_range(&pack_rel(&pack), entry.offset, entry.length)?
+        } else {
+            self.backend.read(&Self::chunk_rel(hash))?
+        };
         let (packed, actual_len) = Self::unpack(&blob, CHUNK_MAGIC)?;
         if actual_len != plain_len {
             return Err(crate::Error::Repo(format!(
@@ -338,10 +365,26 @@ impl Repository {
     ///
     /// Returns [`Error::Io`](crate::Error::Io) when the check fails.
     pub fn chunk_exists(&self, hash: &ChunkHash) -> crate::Result<bool> {
+        let index = self.pack_index()?;
+        if let Some((pack, _)) = index.blobs.get(hash)
+            && index.existing_packs.contains(pack)
+        {
+            return Ok(true);
+        }
         self.backend.exists(&Self::chunk_rel(hash))
     }
 
-    /// Lists every chunk file in the repository (repo-relative paths).
+    /// Hashes of every chunk stored in packs (from the index files).
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from reading or authenticating the index files.
+    pub fn packed_chunk_hashes(&self) -> crate::Result<Vec<ChunkHash>> {
+        Ok(self.pack_index()?.blobs.keys().copied().collect())
+    }
+
+    /// Lists every LOOSE (v1) chunk file in the repository (repo-relative
+    /// paths); chunks stored in packs are not included.
     ///
     /// # Errors
     ///
@@ -669,6 +712,10 @@ impl Repository {
                 }
             }
         }
+        // 2b. Packs: delete dead ones, repack mostly dead ones, rewrite the
+        // index (see `Repository::prune_packs`).
+        self.prune_packs(&referenced, cancel, &mut report)?;
+
         // 3. Interrupted snapshot writes leave temp files next to manifests.
         for rel in self.backend.list("snapshots")? {
             if is_temp_file(&rel) {
@@ -680,7 +727,7 @@ impl Repository {
         Ok(report)
     }
 
-    fn unpack<'a>(blob: &'a [u8], magic: &[u8; 4]) -> crate::Result<(&'a [u8], u64)> {
+    pub(crate) fn unpack<'a>(blob: &'a [u8], magic: &[u8; 4]) -> crate::Result<(&'a [u8], u64)> {
         if blob.len() < HEADER_SIZE || &blob[..4] != magic {
             return Err(crate::Error::Repo("corrupt blob header".into()));
         }
@@ -709,7 +756,7 @@ impl Repository {
 
 /// True for temp names produced by `StorageBackend::write_atomic`
 /// (`<stem>.tmp-<uuid>` locally, `<name>.tmp-<uuid>` over SFTP).
-fn is_temp_file(rel: &str) -> bool {
+pub(crate) fn is_temp_file(rel: &str) -> bool {
     rel.rsplit('/')
         .next()
         .is_some_and(|name| name.contains(".tmp-"))
@@ -800,6 +847,37 @@ mod tests {
         let hash = ChunkHash::from_data(&data);
         repo.store_chunk(&hash, &data).expect("store");
         assert!(repo.read_chunk(&hash, 999).is_err());
+    }
+
+    #[test]
+    fn new_repository_is_version_2_and_unknown_versions_are_refused() {
+        let (dir, repo) = temp_repo();
+        assert_eq!(repo.config().version, 2);
+        let backend = std::sync::Arc::new(LocalFs::new(&dir));
+        // A v1-only reader refuses a newer repository; the same check
+        // refuses any version this code does not know (3).
+        let mut config = repo.config().clone();
+        config.version = 3;
+        backend
+            .write_atomic(
+                "config.json",
+                serde_json::to_string(&config).expect("json").as_bytes(),
+            )
+            .expect("rewrite config");
+        let err = Repository::open(backend.clone(), "pass phrase").unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported repository version 3"),
+            "message must name the version: {err}"
+        );
+        config.version = 1;
+        backend
+            .write_atomic(
+                "config.json",
+                serde_json::to_string(&config).expect("json").as_bytes(),
+            )
+            .expect("rewrite config");
+        Repository::open(backend, "pass phrase").expect("v1 repositories stay readable");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

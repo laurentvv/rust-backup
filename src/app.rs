@@ -1312,7 +1312,8 @@ impl RustBackupApp {
                             )
                             .child(
                                 div()
-                                    .text_size(px(22.0))
+                                    .font_family(theme::DISPLAY_FONT)
+                                    .text_size(px(26.0))
                                     .text_color(cx.theme().foreground)
                                     .child(value.to_string()),
                             ),
@@ -1421,10 +1422,22 @@ impl RustBackupApp {
             )
             .child(
                 div()
-                    .text_size(px(24.0))
+                    .font_family(theme::DISPLAY_FONT)
+                    .text_size(px(28.0))
                     .text_color(cx.theme().foreground)
                     .child(title.to_string()),
             )
+    }
+
+    /// Arche brand mark for the current theme (`fine` = thin stroke for
+    /// small sizes such as the title bar).
+    fn brand_mark(&self, fine: bool) -> &'static str {
+        match (fine, self.dark) {
+            (false, false) => "brand/mark-light.svg",
+            (false, true) => "brand/mark-dark.svg",
+            (true, false) => "brand/mark-fine-light.svg",
+            (true, true) => "brand/mark-fine-dark.svg",
+        }
     }
 
     fn render_dashboard(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
@@ -1451,7 +1464,8 @@ impl RustBackupApp {
             .gap_4()
             .child(
                 div()
-                    .text_size(px(24.0))
+                    .font_family(theme::DISPLAY_FONT)
+                    .text_size(px(28.0))
                     .text_color(cx.theme().foreground)
                     .child(t.dashboard),
             )
@@ -2191,7 +2205,8 @@ impl RustBackupApp {
                     )
                     .child(
                         div()
-                            .text_size(px(24.0))
+                            .font_family(theme::DISPLAY_FONT)
+                            .text_size(px(28.0))
                             .text_color(cx.theme().foreground)
                             .child(title),
                     )
@@ -3633,11 +3648,12 @@ impl gpui::Render for RustBackupApp {
                     h_flex()
                         .gap_2()
                         .items_center()
-                        .child(img("icons/brand-mark.png").size(px(24.0)))
+                        .child(img(self.brand_mark(false)).size(px(28.0)))
                         .child(
                             div()
-                                .text_size(px(16.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_family(theme::DISPLAY_FONT)
+                                .text_size(px(21.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(cx.theme().foreground)
                                 .child("RustBackup"),
                         ),
@@ -3775,11 +3791,12 @@ impl gpui::Render for RustBackupApp {
                     h_flex()
                         .gap_2()
                         .items_center()
-                        .child(img("icons/brand-mark.png").size(px(16.0)))
+                        .child(img(self.brand_mark(true)).size(px(16.0)))
                         .child(
                             div()
-                                .text_size(px(13.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_family(theme::DISPLAY_FONT)
+                                .text_size(px(14.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(cx.theme().foreground)
                                 .child("RustBackup"),
                         )

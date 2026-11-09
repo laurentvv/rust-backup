@@ -51,6 +51,25 @@ pub trait StorageBackend: Send + Sync {
     /// shorter than `offset + len` (a short file is never silently padded).
     fn read_range(&self, rel: &str, offset: u64, len: u64) -> crate::Result<Vec<u8>>;
 
+    /// Reads several exact byte ranges `(offset, len)` of one repository
+    /// file, returning one buffer per range in the same order. Same error
+    /// contract as [`Self::read_range`] (a short file is an error, never
+    /// padded).
+    ///
+    /// Backends override this to open the file once and to keep several
+    /// requests in flight (SFTP); the default simply loops `read_range`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`](crate::Error::Io) when the file is missing or
+    /// shorter than any requested range end.
+    fn read_ranges(&self, rel: &str, ranges: &[(u64, u64)]) -> crate::Result<Vec<Vec<u8>>> {
+        ranges
+            .iter()
+            .map(|&(offset, len)| self.read_range(rel, offset, len))
+            .collect()
+    }
+
     /// Atomically and durably writes `data` at `rel`: write to a temp name in
     /// the same directory, flush it to stable storage, then rename it into
     /// place, creating parent directories as needed. On failure the temp file

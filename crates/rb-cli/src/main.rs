@@ -434,23 +434,61 @@ fn main() -> anyhow::Result<()> {
                 cancel: None,
             };
 
-            let stats = rb_core::restore::restore(
+            let t0 = std::time::Instant::now();
+            let mut last_progress = std::time::Instant::now();
+            let (mut files_total, mut bytes_total) = (0u64, 0u64);
+            let (mut files_done, mut bytes_done) = (0u64, 0u64);
+            let result = rb_core::restore::restore(
                 &repo,
                 &snapshot,
                 &selection,
                 &destination,
                 &options,
                 |event| {
-                    if let rb_core::restore::RestoreEvent::FileSkipped { dest, reason } = event {
-                        eprintln!("skipped: {} ({reason})", dest.display());
+                    match event {
+                        rb_core::restore::RestoreEvent::Planned { files, bytes } => {
+                            files_total = files;
+                            bytes_total = bytes;
+                        }
+                        rb_core::restore::RestoreEvent::BytesWritten { bytes } => {
+                            bytes_done += bytes;
+                        }
+                        rb_core::restore::RestoreEvent::FileDone { .. } => files_done += 1,
+                        rb_core::restore::RestoreEvent::FileSkipped { dest, reason } => {
+                            eprintln!(
+                                "
+skipped: {} ({reason})",
+                                dest.display()
+                            );
+                        }
+                        rb_core::restore::RestoreEvent::FileStarted { .. } => {}
+                    }
+                    if last_progress.elapsed() >= std::time::Duration::from_millis(250) {
+                        last_progress = std::time::Instant::now();
+                        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+                        let secs = t0.elapsed().as_secs_f64().max(0.001);
+                        eprint!(
+                            "\r  {files_done}/{files_total} files | {:>8.1}/{:.1} MiB | {:>6.2} MiB/s  ",
+                            mib(bytes_done),
+                            mib(bytes_total),
+                            mib(bytes_done) / secs
+                        );
+                        use std::io::Write as _;
+                        let _ = std::io::stderr().flush();
                     }
                     Ok(())
                 },
-            )
-            .map_err(|e| anyhow::anyhow!(e))?;
+            );
+            // Terminate the progress line (both on success and failure).
+            eprintln!();
+            let stats = result.map_err(|e| anyhow::anyhow!(e))?;
             println!(
-                "restored: {} files ({} bytes), {} skipped, {} directories created",
-                stats.files_restored, stats.bytes_restored, stats.files_skipped, stats.dirs_created
+                "restored: {} files ({} bytes), {} skipped, {} directories created in {:.1} s",
+                stats.files_restored,
+                stats.bytes_restored,
+                stats.files_skipped,
+                stats.dirs_created,
+                t0.elapsed().as_secs_f64()
             );
         }
         Command::Verify { job, full } => {

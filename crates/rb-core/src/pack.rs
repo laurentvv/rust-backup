@@ -170,20 +170,6 @@ pub(crate) struct PackIndex {
 pub(crate) struct PackState {
     index: std::sync::Mutex<Option<Arc<PackIndex>>>,
     upgraded: std::sync::Mutex<bool>,
-    /// Read-ahead windows of pack files (restore path).
-    windows: std::sync::Mutex<Vec<Window>>,
-}
-
-/// Target size of a read-ahead window.
-const WINDOW_TARGET: u64 = 4 * 1024 * 1024;
-/// Maximum number of cached windows (bounds memory to ~8 x window).
-const WINDOW_SLOTS: usize = 8;
-
-/// A contiguous byte range of one pack, kept in memory.
-struct Window {
-    pack: String,
-    start: u64,
-    data: Arc<Vec<u8>>,
 }
 
 fn guard<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -263,7 +249,6 @@ impl Repository {
     /// Forgets the cached chunk map (after the index set changed).
     pub fn invalidate_pack_index(&self) {
         *guard(&self.pack_state.index) = None;
-        guard(&self.pack_state.windows).clear();
     }
 
     /// The merged chunk map, loaded once per repository instance.
@@ -455,63 +440,6 @@ impl Repository {
     ) -> crate::Result<Vec<u8>> {
         self.backend
             .read_range(&pack_rel(pack_id), entry.offset, entry.length)
-    }
-
-    /// Like [`Self::read_pack_blob`], but served from a small shared
-    /// read-ahead cache: a miss fetches a window (about 4 MiB, never less
-    /// than the blob, clamped to the end of the pack's blob area) with ONE
-    /// range read, so consecutive small blobs cost one round trip instead of
-    /// one each. Blobs not fully inside a window use an exact range read.
-    pub(crate) fn read_pack_blob_windowed(
-        &self,
-        pack_id: &str,
-        entry: &BlobEntry,
-        index: &PackIndex,
-    ) -> crate::Result<Vec<u8>> {
-        let end = entry.offset + entry.length;
-        if entry.length >= WINDOW_TARGET {
-            return self.read_pack_blob(pack_id, entry);
-        }
-        {
-            let mut windows = guard(&self.pack_state.windows);
-            if let Some(pos) = windows.iter().position(|w| {
-                w.pack == pack_id && w.start <= entry.offset && end <= w.start + w.data.len() as u64
-            }) {
-                let win = windows.remove(pos);
-                let from = (entry.offset - win.start) as usize;
-                let blob = win.data[from..from + entry.length as usize].to_vec();
-                windows.push(win); // most recently used goes last
-                return Ok(blob);
-            }
-        }
-        // End of the blob area: the largest blob end the index knows.
-        let data_end = index
-            .packs
-            .get(pack_id)
-            .and_then(|blobs| blobs.values().map(|b| b.offset + b.length).max())
-            .unwrap_or(end);
-        let want = WINDOW_TARGET.min(data_end.saturating_sub(entry.offset));
-        if want <= entry.length {
-            return self.read_pack_blob(pack_id, entry);
-        }
-        let data = Arc::new(
-            self.backend
-                .read_range(&pack_rel(pack_id), entry.offset, want)?,
-        );
-        let blob = data
-            .get(..entry.length as usize)
-            .ok_or_else(|| crate::Error::Repo("short window read".into()))?
-            .to_vec();
-        let mut windows = guard(&self.pack_state.windows);
-        if windows.len() >= WINDOW_SLOTS {
-            windows.remove(0);
-        }
-        windows.push(Window {
-            pack: pack_id.to_owned(),
-            start: entry.offset,
-            data,
-        });
-        Ok(blob)
     }
 
     /// Pack part of [`Repository::prune_orphans`]: delete fully dead and

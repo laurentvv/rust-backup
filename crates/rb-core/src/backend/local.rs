@@ -56,6 +56,19 @@ impl StorageBackend for LocalFs {
         Ok(buf)
     }
 
+    fn read_ranges(&self, rel: &str, ranges: &[(u64, u64)]) -> crate::Result<Vec<Vec<u8>>> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let mut file = std::fs::File::open(self.resolve(rel))?;
+        let mut out = Vec::with_capacity(ranges.len());
+        for &(offset, len) in ranges {
+            file.seek(SeekFrom::Start(offset))?;
+            let mut buf = vec![0u8; usize::try_from(len).map_err(std::io::Error::other)?];
+            file.read_exact(&mut buf)?;
+            out.push(buf);
+        }
+        Ok(out)
+    }
+
     fn write_atomic(&self, rel: &str, data: &[u8]) -> crate::Result<()> {
         let target = self.resolve(rel);
         if let Some(parent) = target.parent() {

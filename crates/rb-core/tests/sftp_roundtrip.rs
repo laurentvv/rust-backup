@@ -718,6 +718,93 @@ fn roundtrip(allow_exec: bool) {
         std::fs::read(source.join("docs/notes.txt")).expect("original")
     );
 
+    // Whole-source restore (every file and directory) through the exact
+    // read path: byte identical, no temp file left.
+    let all_target = base.join("restored-all");
+    let all_stats = restore(
+        &repo,
+        &manifest.id,
+        &[RestoreSelection {
+            source_root: source.clone(),
+            rel_path: PathBuf::new(),
+        }],
+        &RestoreDestination::Target(all_target.clone()),
+        &RestoreOptions::default(),
+        |_| Ok(()),
+    )
+    .expect("full restore over sftp");
+    assert_eq!(all_stats.files_restored, 2);
+    for rel in ["data.bin", "docs/notes.txt"] {
+        assert_eq!(
+            std::fs::read(all_target.join("src").join(rel)).expect("restored"),
+            std::fs::read(source.join(rel)).expect("original"),
+            "{rel} differs"
+        );
+    }
+    let leftovers = walkdir::WalkDir::new(&all_target)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".rbrestore-"))
+        .count();
+    assert_eq!(leftovers, 0, "no restore temp file left behind");
+
+    backend.close().ok();
+}
+
+#[test]
+fn sftp_read_ranges_are_exact_across_request_boundaries_and_error_past_eof() {
+    let (key_path, public) = write_key_file(None);
+    let (port, _root, _syncs) = spawn_server_with(public, true);
+    let backend = SftpBackend::connect(&connect_params(port, &key_path, None)).expect("connect");
+    // Larger than several SFTP read requests (~255 KiB each).
+    let data = random_bytes(2_600_000, 11);
+    backend
+        .write_atomic("packs/cd/multi.pack", &data)
+        .expect("write");
+    let ranges = [
+        (0u64, 10u64),
+        (5, 0),
+        (300_000, 1_500_000),
+        (262_131, 262_131),
+        (1_800_000, 800_000),
+        (2_599_999, 1),
+    ];
+    let got = backend
+        .read_ranges("packs/cd/multi.pack", &ranges)
+        .expect("ranges");
+    assert_eq!(got.len(), ranges.len());
+    for (&(offset, len), buf) in ranges.iter().zip(&got) {
+        let (offset, len) = (offset as usize, len as usize);
+        assert_eq!(
+            buf.as_slice(),
+            &data[offset..offset + len],
+            "range {offset}+{len}"
+        );
+    }
+    // Same through read_range, at the very end of the file.
+    assert_eq!(
+        backend
+            .read_range("packs/cd/multi.pack", 2_000_000, 600_000)
+            .expect("tail"),
+        &data[2_000_000..]
+    );
+    // One bad range fails the whole call; the reader keeps working after.
+    assert!(
+        backend
+            .read_ranges("packs/cd/multi.pack", &[(0, 10), (2_599_999, 2)])
+            .is_err()
+    );
+    assert!(
+        backend
+            .read_ranges("packs/cd/missing.pack", &[(0, 10)])
+            .is_err()
+    );
+    assert_eq!(
+        backend
+            .read_range("packs/cd/multi.pack", 100, 50)
+            .expect("after errors"),
+        &data[100..150]
+    );
     backend.close().ok();
 }
 

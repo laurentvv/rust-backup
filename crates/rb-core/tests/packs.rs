@@ -500,10 +500,27 @@ fn p8_full_verify_detects_blob_corruption_trailer_damage_and_index_drift() {
     cleanup(&env3);
 }
 
-/// Backend wrapper counting `read_range` calls.
+/// Backend wrapper counting `read_range` / `read_ranges` / loose `read` calls.
 struct CountingBackend {
     inner: LocalFs,
     ranges: std::sync::atomic::AtomicUsize,
+    whole: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingBackend {
+    fn new(root: &Path) -> Arc<Self> {
+        Arc::new(Self {
+            inner: LocalFs::new(root),
+            ranges: std::sync::atomic::AtomicUsize::new(0),
+            whole: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+    fn range_calls(&self) -> usize {
+        self.ranges.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn whole_reads(&self) -> usize {
+        self.whole.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl StorageBackend for CountingBackend {
@@ -517,12 +534,21 @@ impl StorageBackend for CountingBackend {
         self.inner.describe()
     }
     fn read(&self, rel: &str) -> rb_core::Result<Vec<u8>> {
+        if rel.starts_with("chunks/") {
+            self.whole
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         self.inner.read(rel)
     }
     fn read_range(&self, rel: &str, offset: u64, len: u64) -> rb_core::Result<Vec<u8>> {
         self.ranges
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner.read_range(rel, offset, len)
+    }
+    fn read_ranges(&self, rel: &str, ranges: &[(u64, u64)]) -> rb_core::Result<Vec<Vec<u8>>> {
+        self.ranges
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.read_ranges(rel, ranges)
     }
     fn write_atomic(&self, rel: &str, data: &[u8]) -> rb_core::Result<()> {
         self.inner.write_atomic(rel, data)
@@ -561,9 +587,9 @@ fn restore_leftovers(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Restore of ~600 small packed files with several workers is byte
-/// identical and needs far fewer backend range reads than chunks.
+/// identical and costs about one backend range read per pack touched.
 #[test]
-fn restore_many_small_files_uses_read_ahead_windows() {
+fn restore_many_small_files_reads_each_pack_once() {
     let env = env("window");
     let source = source_dir(&env, "src");
     std::fs::create_dir_all(source.join("d")).expect("d");
@@ -586,24 +612,176 @@ fn restore_many_small_files_uses_read_ahead_windows() {
         .map(|e| e.chunks.len())
         .sum();
     assert!(chunks >= 600);
+    let packs = files_in(&env.dest, "packs", ".pack").len();
 
-    let backend = Arc::new(CountingBackend {
-        inner: LocalFs::new(&env.dest),
-        ranges: std::sync::atomic::AtomicUsize::new(0),
-    });
+    let backend = CountingBackend::new(&env.dest);
     let repo = Repository::open(backend.clone(), PASS).expect("open");
     let target = env.base.join("out");
     let stats = restore_to(&repo, &manifest, &source, "", &target).expect("restore");
     assert_eq!(stats.files_restored, 600);
-    let calls = backend.ranges.load(std::sync::atomic::Ordering::Relaxed);
+    let calls = backend.range_calls();
     assert!(
-        calls <= chunks / 10,
-        "{calls} range reads for {chunks} chunks"
+        calls <= packs + 2,
+        "{calls} range reads for {packs} packs ({chunks} chunks)"
     );
+    assert_eq!(backend.whole_reads(), 0, "no loose chunk read in a v2 repo");
     let root = target.join("src");
     for (rel, data) in &expected {
         assert_eq!(&std::fs::read(root.join(rel)).expect("restored"), data);
     }
+    assert!(restore_leftovers(&target).is_empty());
+    cleanup(&env);
+}
+
+/// Manifest with one source made of `entries` (restores need nothing else).
+fn manifest_of(env: &Env, root: &Path, entries: Vec<FileEntry>) -> SnapshotManifest {
+    let mut manifest = SnapshotManifest::new(Uuid::new_v4(), "fabricated");
+    manifest.sources.push(SourceSnapshot {
+        root: root.to_path_buf(),
+        entries,
+    });
+    env.repo.write_manifest(&manifest).expect("manifest");
+    manifest
+}
+
+fn file_entry(path: &str, chunks: Vec<ChunkRef>) -> FileEntry {
+    FileEntry {
+        path: PathBuf::from(path),
+        size: chunks.iter().map(|c| c.plain_len).sum(),
+        mtime_ns: 1_700_000_000_000_000_000,
+        kind: EntryKind::File,
+        chunks,
+    }
+}
+
+/// A blob shared by two files and repeated several times inside one file is
+/// read once and written at every offset.
+#[test]
+fn restore_shared_and_repeated_blobs_land_at_every_offset() {
+    let env = env("shared");
+    let source = source_dir(&env, "src");
+    let data = random_bytes(900_000, 21);
+    std::fs::write(source.join("x.bin"), &data).expect("x");
+    std::fs::write(source.join("y.bin"), &data).expect("y");
+    let (manifest, _) = run(&env.repo, &job(&env, "s", &source));
+    let entries = &manifest.sources[0].entries;
+    let x = entries
+        .iter()
+        .find(|e| e.path == Path::new("x.bin"))
+        .expect("x entry");
+    assert!(!x.chunks.is_empty());
+
+    // rep.bin = x ++ x ++ first chunk of x (same blobs, several offsets).
+    let mut rep_chunks = x.chunks.clone();
+    rep_chunks.extend(x.chunks.clone());
+    rep_chunks.push(x.chunks[0].clone());
+    let first_len = x.chunks[0].plain_len as usize;
+    let mut rep_expected = data.clone();
+    rep_expected.extend_from_slice(&data);
+    rep_expected.extend_from_slice(&data[..first_len]);
+    let mut all = entries.clone();
+    all.push(file_entry("rep.bin", rep_chunks));
+    let fabricated = manifest_of(&env, &source, all);
+
+    let backend = CountingBackend::new(&env.dest);
+    let repo = Repository::open(backend.clone(), PASS).expect("open");
+    let target = env.base.join("out");
+    let stats = restore_to(&repo, &fabricated, &source, "", &target).expect("restore");
+    assert_eq!(stats.files_restored, 3);
+    let root = target.join("src");
+    assert_eq!(std::fs::read(root.join("x.bin")).expect("x"), data);
+    assert_eq!(std::fs::read(root.join("y.bin")).expect("y"), data);
+    assert_eq!(
+        std::fs::read(root.join("rep.bin")).expect("rep"),
+        rep_expected
+    );
+    let packs = files_in(&env.dest, "packs", ".pack").len();
+    assert!(backend.range_calls() <= packs + 2);
+    assert!(restore_leftovers(&target).is_empty());
+    cleanup(&env);
+}
+
+/// A file larger than a pack spans several packs; restored byte-identical
+/// with one range read per pack, whatever the worker count.
+#[test]
+fn restore_large_file_spanning_several_packs() {
+    let env = env("span");
+    let source = source_dir(&env, "src");
+    let big = random_bytes(36 * 1024 * 1024, 77);
+    std::fs::write(source.join("big.bin"), &big).expect("big");
+    std::fs::write(source.join("small.txt"), b"tail\n".repeat(100)).expect("small");
+    let (manifest, _) = run(&env.repo, &job(&env, "span", &source));
+    let packs = files_in(&env.dest, "packs", ".pack").len();
+    assert!(packs >= 3, "expected several packs, got {packs}");
+
+    let backend = CountingBackend::new(&env.dest);
+    let repo = Repository::open(backend.clone(), PASS).expect("open");
+    let target = env.base.join("out");
+    let stats = restore_to(&repo, &manifest, &source, "", &target).expect("restore");
+    assert_eq!(stats.files_restored, 2);
+    assert!(
+        std::fs::read(target.join("src/big.bin")).expect("big") == big,
+        "big.bin differs"
+    );
+    assert!(backend.range_calls() <= packs + 2);
+    assert!(restore_leftovers(&target).is_empty());
+    cleanup(&env);
+}
+
+/// A repository holding only loose v1 chunks restores through the plan
+/// engine too (shared and repeated loose chunks included).
+#[test]
+fn restore_from_loose_v1_chunks() {
+    let env = env("loose");
+    let root = source_dir(&env, "oldsrc");
+    let parts: Vec<Vec<u8>> = (0u64..3)
+        .map(|i| random_bytes(60_000 + i as usize, 30 + i))
+        .collect();
+    let refs: Vec<ChunkRef> = parts
+        .iter()
+        .map(|p| {
+            let hash = ChunkHash::from_data(p);
+            assert!(env.repo.store_chunk(&hash, p).expect("loose"));
+            ChunkRef {
+                hash,
+                plain_len: p.len() as u64,
+            }
+        })
+        .collect();
+    let manifest = manifest_of(
+        &env,
+        &root,
+        vec![
+            file_entry(
+                "a.bin",
+                vec![refs[0].clone(), refs[1].clone(), refs[2].clone()],
+            ),
+            file_entry("b.bin", vec![refs[1].clone()]),
+            file_entry(
+                "c.bin",
+                vec![refs[2].clone(), refs[2].clone(), refs[0].clone()],
+            ),
+        ],
+    );
+    assert!(env.repo.packed_chunk_hashes().expect("hashes").is_empty());
+
+    let backend = CountingBackend::new(&env.dest);
+    let repo = Repository::open(backend.clone(), PASS).expect("open");
+    let target = env.base.join("out");
+    let stats = restore_to(&repo, &manifest, &root, "", &target).expect("restore");
+    assert_eq!(stats.files_restored, 3);
+    let out = target.join("oldsrc");
+    let cat = |ids: &[usize]| -> Vec<u8> { ids.iter().flat_map(|&i| parts[i].clone()).collect() };
+    assert_eq!(
+        std::fs::read(out.join("a.bin")).expect("a"),
+        cat(&[0, 1, 2])
+    );
+    assert_eq!(std::fs::read(out.join("b.bin")).expect("b"), cat(&[1]));
+    assert_eq!(
+        std::fs::read(out.join("c.bin")).expect("c"),
+        cat(&[2, 2, 0])
+    );
+    assert_eq!(backend.whole_reads(), 3, "each loose chunk is read once");
     assert!(restore_leftovers(&target).is_empty());
     cleanup(&env);
 }
@@ -640,6 +818,50 @@ fn cancelled_restore_leaves_no_temp_files() {
         |_| {
             seen += 1;
             if seen == 20 {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(())
+        },
+    );
+    assert!(
+        matches!(result, Err(rb_core::Error::Cancelled)),
+        "{result:?}"
+    );
+    assert!(restore_leftovers(&target).is_empty());
+    cleanup(&env);
+}
+
+/// Cancelling right after the first bytes were written (files in flight,
+/// temp files open) removes every temp file.
+#[test]
+fn cancel_while_files_are_in_flight_cleans_up() {
+    let env = env("cancel2");
+    let source = source_dir(&env, "src");
+    for i in 0u64..300 {
+        std::fs::write(
+            source.join(format!("g{i:03}.bin")),
+            random_bytes(150_000, i + 1),
+        )
+        .expect("file");
+    }
+    let (manifest, _) = run(&env.repo, &job(&env, "c2", &source));
+    let target = env.base.join("out");
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let options = RestoreOptions {
+        cancel: Some(Arc::clone(&cancel)),
+        ..RestoreOptions::default()
+    };
+    let result = restore(
+        &env.repo,
+        &manifest.id,
+        &[RestoreSelection {
+            source_root: source.clone(),
+            rel_path: PathBuf::new(),
+        }],
+        &RestoreDestination::Target(target.clone()),
+        &options,
+        |event| {
+            if matches!(event, rb_core::restore::RestoreEvent::BytesWritten { .. }) {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             Ok(())

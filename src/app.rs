@@ -669,6 +669,11 @@ impl RustBackupApp {
                     ) => {
                         app.restore_files_done += 1;
                     }
+                    // Totals and intra-file byte progress: not shown by the GUI.
+                    runner::RestoreEvent::Progress(
+                        rb_core::restore::RestoreEvent::Planned { .. }
+                        | rb_core::restore::RestoreEvent::BytesWritten { .. },
+                    ) => {}
                     runner::RestoreEvent::Finished(Ok(stats)) => {
                         app.restore_busy = false;
                         app.restore_cancel = None;

@@ -222,6 +222,8 @@ pub struct Texts {
     pub restoring: &'static str,
     /// Cancel restore button.
     pub cancel_restore: &'static str,
+    /// Remaining-time label of the restore progress ("ETA").
+    pub time_left: &'static str,
     /// Restore cancelled.
     pub restore_cancelled: &'static str,
     /// Prune button.
@@ -362,6 +364,7 @@ pub const FR: Texts = Texts {
     collapse_all: "Tout replier",
     restoring: "Restauration en cours…",
     cancel_restore: "Annuler la restauration",
+    time_left: "restant",
     restore_cancelled: "Restauration annulée",
     prune: "Nettoyer l'espace (Prune)",
     pruning: "Nettoyage en cours…",
@@ -486,6 +489,7 @@ pub const EN: Texts = Texts {
     collapse_all: "Collapse all",
     restoring: "Restoring files…",
     cancel_restore: "Cancel restore",
+    time_left: "left",
     restore_cancelled: "Restore cancelled",
     prune: "Prune storage",
     pruning: "Pruning in progress…",
@@ -535,6 +539,24 @@ pub fn human_bytes_lang(bytes: u64, lang: Lang) -> String {
     }
 }
 
+/// Remaining time, compact and language neutral: `1h02m`, `4m05s`, `6s`.
+#[must_use]
+pub fn format_eta(secs: f64) -> String {
+    let total = if secs.is_finite() {
+        secs.max(0.0).round() as u64
+    } else {
+        0
+    };
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
 /// Human-readable byte size (default French units for backward compatibility).
 #[must_use]
 #[allow(dead_code)]
@@ -545,6 +567,14 @@ pub fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_eta_is_compact() {
+        assert_eq!(format_eta(6.4), "6s");
+        assert_eq!(format_eta(245.0), "4m05s");
+        assert_eq!(format_eta(3723.0), "1h02m");
+        assert_eq!(format_eta(f64::INFINITY), "0s");
+    }
 
     #[test]
     fn test_human_bytes_formatting() {

@@ -1,12 +1,13 @@
 //! SFTP backend: repository on a remote Linux server, public-key auth.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use russh_sftp::client::SftpSession;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use russh_sftp::client::{RawSftpSession, SftpSession};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{ChunkWriter, StorageBackend};
 
@@ -56,6 +57,9 @@ pub struct SftpBackend {
     /// Remote durability barrier shared by every chunk writer, probed once
     /// on the first `open_writer` (`None` = per-chunk fsync fallback).
     barrier: Arc<OnceLock<Option<Arc<RemoteBarrier>>>>,
+    /// Lazily opened reader channels for exact range reads (restore,
+    /// verify): see [`ReaderPool`].
+    readers: Arc<ReaderPool>,
     remote_root: String,
     description: String,
 }
@@ -91,6 +95,7 @@ impl SftpBackend {
             session: Arc::new(session),
             params: Arc::new(params.clone()),
             barrier: Arc::new(OnceLock::new()),
+            readers: Arc::new(ReaderPool::new()),
             remote_root: params.remote_root.clone(),
             description: format!(
                 "sftp: {}@{}:{}",
@@ -136,6 +141,25 @@ impl SftpBackend {
             .clone()
     }
 
+    /// Picks a reader (round robin), opening its channel or connection on
+    /// first use. Returns the slot index with it.
+    fn reader(&self) -> crate::Result<(usize, Arc<Reader>)> {
+        let slot = self.readers.next.fetch_add(1, Ordering::Relaxed) % self.readers.slots.len();
+        let mut guard = self.readers.slots[slot]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(reader) = guard.as_ref() {
+            return Ok((slot, Arc::clone(reader)));
+        }
+        let params = Arc::clone(&self.params);
+        let session = Arc::clone(&self.session);
+        let reader = Arc::new(self.runtime.block_on(async move {
+            open_reader(&params, &session, WriterTransport::from_env()).await
+        })?);
+        *guard = Some(Arc::clone(&reader));
+        Ok((slot, reader))
+    }
+
     fn remote_path(&self, rel: &str) -> String {
         format!(
             "{}/{}",
@@ -169,19 +193,27 @@ impl StorageBackend for SftpBackend {
     }
 
     fn read_range(&self, rel: &str, offset: u64, len: u64) -> crate::Result<Vec<u8>> {
+        let mut out = self.read_ranges(rel, &[(offset, len)])?;
+        out.pop()
+            .ok_or_else(|| sftp_error("read_ranges returned no buffer".into()))
+    }
+
+    fn read_ranges(&self, rel: &str, ranges: &[(u64, u64)]) -> crate::Result<Vec<Vec<u8>>> {
+        if ranges.is_empty() {
+            return Ok(Vec::new());
+        }
         let path = self.remote_path(rel);
-        let sftp = Arc::clone(&self.sftp);
-        let len = usize::try_from(len).map_err(std::io::Error::other)?;
-        self.runtime.block_on(async move {
-            let mut file = sftp
-                .open_with_flags(&path, russh_sftp::protocol::OpenFlags::READ)
-                .await?;
-            file.seek(std::io::SeekFrom::Start(offset)).await?;
-            let mut buf = vec![0u8; len];
-            file.read_exact(&mut buf).await?;
-            file.shutdown().await?;
-            Ok(buf)
-        })
+        let (slot, reader) = self.reader()?;
+        let outcome = self
+            .runtime
+            .block_on(read_ranges_exact(Arc::clone(&reader), &path, ranges));
+        if let Err(err) = &outcome
+            && !matches!(err, crate::Error::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof)
+        {
+            // Transport trouble: drop this reader so the next call reconnects.
+            self.readers.discard(slot, &reader);
+        }
+        outcome
     }
 
     fn write_atomic(&self, rel: &str, data: &[u8]) -> crate::Result<()> {
@@ -312,6 +344,221 @@ impl StorageBackend for SftpBackend {
             op_times: OpTimes::default(),
         }))
     }
+}
+
+/// Number of reader channels (`RBACKUP_SFTP_READERS`, 1..=8, default 4).
+const READERS_ENV: &str = "RBACKUP_SFTP_READERS";
+const DEFAULT_READERS: usize = 4;
+/// Read requests kept in flight per `read_ranges` call: 48 x ~255 KiB, about
+/// 12 MiB on the wire, enough to fill a LAN link without reading beyond the
+/// requested bytes.
+const READ_WINDOW: usize = 48;
+/// SFTP read reply overhead: packet_len(4) + type(1) + id(4) + data_len(4).
+const READ_OVERHEAD: u32 = 13;
+
+/// One dedicated raw SFTP session used for exact range reads.
+///
+/// russh-sftp's high-level `File` reader pipelines up to
+/// `max_concurrent_reads` requests AHEAD of what the caller consumes, so a
+/// 4 MiB range read costs about twice the bytes from a slow disk and the
+/// close waits for the surplus. The raw session lets us issue exactly the
+/// requested bytes, nothing more.
+struct Reader {
+    raw: Arc<RawSftpSession>,
+    /// Largest read the server accepts per request.
+    read_len: u32,
+    /// Dedicated SSH connection (kept alive); `None` for a shared channel.
+    _connection: Option<russh::client::Handle<ClientHandler>>,
+}
+
+/// Small pool of lazily created readers shared by every clone of the
+/// backend. Transport follows the writers' choice (`RBACKUP_SFTP_WRITERS`):
+/// by default one SSH connection per reader, which avoids Nagle/delayed-ACK
+/// interplay on a shared TCP stream and the OpenSSH `MaxSessions` channel
+/// cap; `channel` multiplexes them on the control connection.
+struct ReaderPool {
+    slots: Vec<Mutex<Option<Arc<Reader>>>>,
+    next: AtomicUsize,
+}
+
+impl ReaderPool {
+    fn new() -> Self {
+        let count = std::env::var(READERS_ENV)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(DEFAULT_READERS, |n| n.clamp(1, 8));
+        Self {
+            slots: (0..count).map(|_| Mutex::new(None)).collect(),
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    /// Forgets `reader` if it still occupies `slot`.
+    fn discard(&self, slot: usize, reader: &Arc<Reader>) {
+        let mut guard = self.slots[slot]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.as_ref().is_some_and(|r| Arc::ptr_eq(r, reader)) {
+            *guard = None;
+        }
+    }
+}
+
+async fn open_reader(
+    params: &SftpConnect,
+    shared: &russh::client::Handle<ClientHandler>,
+    transport: WriterTransport,
+) -> crate::Result<Reader> {
+    let (connection, stream) = match transport {
+        WriterTransport::Connection => {
+            let session = connect_ssh(params).await?;
+            let stream = open_sftp_stream(&session).await?;
+            (Some(session), stream)
+        }
+        WriterTransport::Channel => (None, open_sftp_stream(shared).await?),
+    };
+    let cfg = sftp_client_config();
+    let mut read_len = u64::from(cfg.max_packet_len.saturating_sub(READ_OVERHEAD));
+    let raw = RawSftpSession::new_with_config(stream, cfg);
+    let version = raw.init().await?;
+    let has_limits = version
+        .extensions
+        .get(russh_sftp::extensions::LIMITS)
+        .is_some_and(|v| v == "1");
+    if has_limits && let Ok(limits) = raw.limits().await {
+        if limits.max_read_len > 0 {
+            read_len = read_len.min(limits.max_read_len);
+        }
+        if limits.max_packet_len > u64::from(READ_OVERHEAD) {
+            read_len = read_len.min(limits.max_packet_len - u64::from(READ_OVERHEAD));
+        }
+    }
+    Ok(Reader {
+        raw: Arc::new(raw),
+        read_len: u32::try_from(read_len.max(1)).unwrap_or(u32::MAX),
+        _connection: connection,
+    })
+}
+
+fn eof_error(path: &str) -> crate::Error {
+    crate::Error::Io(std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        format!("{path}: range extends past the end of the file"),
+    ))
+}
+
+/// Reads every range exactly: open once, keep up to [`READ_WINDOW`]
+/// requests in flight, never ask for a byte outside the ranges, close.
+async fn read_ranges_exact(
+    reader: Arc<Reader>,
+    path: &str,
+    ranges: &[(u64, u64)],
+) -> crate::Result<Vec<Vec<u8>>> {
+    let handle = reader
+        .raw
+        .open(
+            path,
+            russh_sftp::protocol::OpenFlags::READ,
+            russh_sftp::protocol::FileAttributes::empty(),
+        )
+        .await?
+        .handle;
+    let fetched = fetch_ranges(&reader, &handle, path, ranges).await;
+    // The close reply does not matter for a read-only handle.
+    let _ = reader.raw.close(handle).await;
+    fetched
+}
+
+async fn fetch_ranges(
+    reader: &Reader,
+    handle: &str,
+    path: &str,
+    ranges: &[(u64, u64)],
+) -> crate::Result<Vec<Vec<u8>>> {
+    let mut out = Vec::with_capacity(ranges.len());
+    for &(_, len) in ranges {
+        out.push(Vec::with_capacity(
+            usize::try_from(len).map_err(std::io::Error::other)?,
+        ));
+    }
+    let read_len = u64::from(reader.read_len);
+    let mut requests = ranges.iter().enumerate().flat_map(|(idx, &(offset, len))| {
+        let end = offset.saturating_add(len);
+        (0..len.div_ceil(read_len)).map(move |n| {
+            let at = offset + n * read_len;
+            (
+                idx,
+                at,
+                u32::try_from((end - at).min(read_len)).unwrap_or(u32::MAX),
+            )
+        })
+    });
+    let mut inflight: VecDeque<(usize, tokio::task::JoinHandle<crate::Result<Vec<u8>>>)> =
+        VecDeque::with_capacity(READ_WINDOW);
+    let outcome = loop {
+        while inflight.len() < READ_WINDOW
+            && let Some((idx, at, len)) = requests.next()
+        {
+            let raw = Arc::clone(&reader.raw);
+            let handle = handle.to_owned();
+            let path = path.to_owned();
+            inflight.push_back((
+                idx,
+                tokio::spawn(async move { read_exact_at(&raw, &handle, &path, at, len).await }),
+            ));
+        }
+        let Some((idx, task)) = inflight.pop_front() else {
+            break Ok(());
+        };
+        match task.await {
+            Ok(Ok(data)) => out[idx].extend_from_slice(&data),
+            Ok(Err(err)) => break Err(err),
+            Err(join) => break Err(sftp_error(format!("read task failed: {join}"))),
+        }
+    };
+    if let Err(err) = outcome {
+        for (_, task) in inflight {
+            task.abort();
+        }
+        return Err(err);
+    }
+    Ok(out)
+}
+
+/// One request, re-issued for the remainder after a short reply.
+async fn read_exact_at(
+    raw: &RawSftpSession,
+    handle: &str,
+    path: &str,
+    mut offset: u64,
+    mut len: u32,
+) -> crate::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(len as usize);
+    while len > 0 {
+        match raw.read(handle, offset, len).await {
+            Ok(reply) => {
+                let got = u32::try_from(reply.data.len()).unwrap_or(u32::MAX);
+                if got == 0 {
+                    return Err(eof_error(path));
+                }
+                if got > len {
+                    return Err(sftp_error(format!(
+                        "{path}: server returned too many bytes"
+                    )));
+                }
+                buf.extend_from_slice(&reply.data);
+                offset += u64::from(got);
+                len -= got;
+            }
+            Err(russh_sftp::client::error::Error::Status(status))
+                if status.status_code == russh_sftp::protocol::StatusCode::Eof =>
+            {
+                return Err(eof_error(path));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(buf)
 }
 
 /// How each parallel chunk writer reaches the server.
@@ -622,6 +869,14 @@ impl ChunkWriter for SftpChunkWriter {
 async fn connect_inner(
     params: &SftpConnect,
 ) -> crate::Result<(SftpSession, russh::client::Handle<ClientHandler>)> {
+    let session = connect_ssh(params).await?;
+    let sftp = open_sftp_channel(&session).await?;
+    mkdirs_remote(&sftp, &params.remote_root).await?;
+    Ok((sftp, session))
+}
+
+/// Opens and authenticates one SSH connection (no SFTP channel yet).
+async fn connect_ssh(params: &SftpConnect) -> crate::Result<russh::client::Handle<ClientHandler>> {
     // The engine issues many small SFTP requests (open/write/fsync/rename);
     // Nagle's algorithm would serialize each request/ack exchange behind
     // delayed ACKs on every chunk.
@@ -654,16 +909,14 @@ async fn connect_inner(
             "public key authentication refused by server".into(),
         ));
     }
-
-    let sftp = open_sftp_channel(&session).await?;
-    mkdirs_remote(&sftp, &params.remote_root).await?;
-    Ok((sftp, session))
+    Ok(session)
 }
 
-/// Opens one more SFTP session on the live SSH connection.
-async fn open_sftp_channel(
+/// Opens a session channel with the `sftp` subsystem and returns its byte
+/// stream (not yet speaking SFTP).
+async fn open_sftp_stream(
     session: &russh::client::Handle<ClientHandler>,
-) -> crate::Result<SftpSession> {
+) -> crate::Result<russh::ChannelStream<russh::client::Msg>> {
     let channel = session
         .channel_open_session()
         .await
@@ -672,7 +925,15 @@ async fn open_sftp_channel(
         .request_subsystem(true, "sftp")
         .await
         .map_err(|e| crate::Error::Io(std::io::Error::other(format!("subsystem: {e}"))))?;
-    SftpSession::new_with_config(channel.into_stream(), sftp_client_config())
+    Ok(channel.into_stream())
+}
+
+/// Opens one more SFTP session on the live SSH connection.
+async fn open_sftp_channel(
+    session: &russh::client::Handle<ClientHandler>,
+) -> crate::Result<SftpSession> {
+    let stream = open_sftp_stream(session).await?;
+    SftpSession::new_with_config(stream, sftp_client_config())
         .await
         .map_err(|e| crate::Error::Repo(format!("sftp init: {e}")))
 }

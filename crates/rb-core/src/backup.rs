@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use walkdir::WalkDir;
@@ -533,6 +533,8 @@ impl ChunkPipeline {
         // run before anything is read.
         let backend = Arc::clone(repo.backend());
         let wanted = upload_workers();
+        // Writers still consuming the queue (see the drain below).
+        let active = Arc::new(AtomicUsize::new(wanted));
         for worker_id in 0..wanted {
             let mut writer = backend.open_writer().map_err(|e| {
                 crate::Error::Repo(format!(
@@ -548,6 +550,7 @@ impl ChunkPipeline {
             let times = Arc::clone(&times);
             let builder = Arc::clone(&builder);
             let packs = Arc::clone(&packs);
+            let active = Arc::clone(&active);
             let repo = repo.clone();
             workers.push(std::thread::spawn(move || {
                 // Seals a full pack and writes it through this writer.
@@ -578,12 +581,17 @@ impl ChunkPipeline {
                         return;
                     }
                 }
-                // Queue drained: write whatever the shared builder still
-                // holds. Appends happen only before a thread's own drain,
-                // so the last thread to get here sees every leftover.
-                let rest = {
+                // Queue drained: the LAST writer to get here writes whatever
+                // the shared builder still holds. A writer only appends
+                // before its own decrement, so the last one sees every
+                // leftover; letting earlier writers flush too produced
+                // several small partial packs per run.
+                let last = active.fetch_sub(1, Ordering::AcqRel) == 1;
+                let rest = if last {
                     let mut b = lock(&builder);
                     (!b.is_empty()).then(|| std::mem::replace(&mut *b, PackBuilder::new()))
+                } else {
+                    None
                 };
                 if let Some(rest) = rest
                     && let Err(e) = flush(&mut writer, rest)

@@ -342,14 +342,26 @@ impl Repository {
     /// violations and [`Error::Crypto`](crate::Error::Crypto) on
     /// authentication failure.
     pub fn read_chunk(&self, hash: &ChunkHash, plain_len: u64) -> crate::Result<Vec<u8>> {
-        let located = self.pack_index()?.blobs.get(hash).cloned();
-        let blob = if let Some((pack, entry)) = located {
+        let index = self.pack_index()?;
+        let blob = if let Some((pack, entry)) = index.blobs.get(hash) {
             self.backend
-                .read_range(&pack_rel(&pack), entry.offset, entry.length)?
+                .read_range(&pack_rel(pack), entry.offset, entry.length)?
         } else {
             self.backend.read(&Self::chunk_rel(hash))?
         };
-        let (packed, actual_len) = Self::unpack(&blob, CHUNK_MAGIC)?;
+        self.open_chunk_blob(&blob, hash, plain_len)
+    }
+
+    /// Opens a stored chunk blob (header, MAC bound to `hash` and
+    /// `plain_len`, decompression). Does NOT re-hash the plaintext: callers
+    /// that need the content check compare `ChunkHash::from_data` themselves.
+    pub(crate) fn open_chunk_blob(
+        &self,
+        blob: &[u8],
+        hash: &ChunkHash,
+        plain_len: u64,
+    ) -> crate::Result<Vec<u8>> {
+        let (packed, actual_len) = Self::unpack(blob, CHUNK_MAGIC)?;
         if actual_len != plain_len {
             return Err(crate::Error::Repo(format!(
                 "chunk {hash} declares {actual_len} bytes, caller expected {plain_len}"

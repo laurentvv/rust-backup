@@ -630,9 +630,9 @@ impl Worker<'_> {
                     let blob = &pack.blobs[i];
                     let begin =
                         usize::try_from(blob.offset - run.start).map_err(std::io::Error::other)?;
-                    let stored = usize::try_from(blob.length)
-                        .ok()
-                        .and_then(|len| buffer.get(begin..begin + len))
+                    let len = usize::try_from(blob.length).map_err(std::io::Error::other)?;
+                    let stored = buffer
+                        .get(begin..begin + len)
                         .ok_or_else(|| crate::Error::Repo(format!("short range read in {rel}")))?;
                     written += self.write_blob(blob, stored)?;
                 }
@@ -691,6 +691,8 @@ impl Worker<'_> {
         if let Some(file) = self.ctx.cache_get(slot) {
             return Ok(file);
         }
+        // The slot lock is held until the temp file exists AND `state.tmp` is
+        // set, so two workers can never create two temp files for one slot.
         let mut state = lock(&self.ctx.slots[slot]);
         let file = if let Some(tmp) = &state.tmp {
             std::fs::OpenOptions::new().write(true).open(tmp)?

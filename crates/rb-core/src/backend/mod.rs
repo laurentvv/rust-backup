@@ -16,6 +16,18 @@ pub use sftp::{HostKeyPolicy, SftpBackend, SftpConnect};
 /// complete file at its final name or leaves no trace of it — a reader must
 /// never observe a half-written chunk or manifest.
 pub trait StorageBackend: Send + Sync {
+    /// Opens a dedicated writer handle for parallel chunk uploads.
+    ///
+    /// Each handle carries its own resources (SFTP channel and directory
+    /// cache, or local directory cache) so several upload workers can write
+    /// chunks concurrently without contending on one session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend cannot open another writer
+    /// (connection failure, unsupported backend).
+    fn open_writer(&self) -> crate::Result<Box<dyn ChunkWriter>>;
+
     /// Backend identifier for logs and the UI ("local", "sftp").
     fn kind(&self) -> &'static str;
 
@@ -75,4 +87,22 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// Returns [`Error::Io`](crate::Error::Io) on failure.
     fn remove(&self, rel: &str) -> crate::Result<()>;
+}
+
+/// Dedicated write handle for NEW chunk files, used by the backup
+/// pipeline's upload workers.
+///
+/// Unlike [`StorageBackend::write_atomic`], `write_new` skips the existence
+/// check and the per-segment directory probing: the pipeline already knows
+/// (in-memory chunk index + exclusive repository lock) that the target is
+/// absent, and the writer caches directories it has created. Durability is
+/// identical: temp name, flush to stable storage, rename into place.
+pub trait ChunkWriter: Send {
+    /// Atomically and durably writes `data` to `rel`, which must not exist
+    /// yet. On failure the temp file is removed (best effort).
+    ///
+    /// # Errors
+    ///
+    /// Returns IO errors as usual; nothing partial is left behind.
+    fn write_new(&mut self, rel: &str, data: &[u8]) -> crate::Result<()>;
 }

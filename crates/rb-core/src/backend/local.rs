@@ -1,11 +1,12 @@
 //! Local-filesystem backend: USB disks, internal drives, mounted shares.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use super::StorageBackend;
+use super::{ChunkWriter, StorageBackend};
 
 /// Storage on a locally mounted folder.
 #[derive(Debug, Clone)]
@@ -110,6 +111,49 @@ impl StorageBackend for LocalFs {
         let target = self.resolve(rel);
         if target.exists() {
             std::fs::remove_file(&target)?;
+        }
+        Ok(())
+    }
+
+    fn open_writer(&self) -> crate::Result<Box<dyn ChunkWriter>> {
+        Ok(Box::new(LocalChunkWriter {
+            root: self.root.clone(),
+            dirs: HashSet::new(),
+        }))
+    }
+}
+
+/// Parallel chunk writer for [`LocalFs`]: same durability as
+/// [`StorageBackend::write_atomic`] (temp, sync, rename) minus the redundant
+/// directory probing — parents are created once and remembered.
+struct LocalChunkWriter {
+    root: PathBuf,
+    dirs: HashSet<PathBuf>,
+}
+
+impl ChunkWriter for LocalChunkWriter {
+    fn write_new(&mut self, rel: &str, data: &[u8]) -> crate::Result<()> {
+        let target = self
+            .root
+            .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if let Some(parent) = target.parent()
+            && !self.dirs.contains(parent)
+        {
+            std::fs::create_dir_all(parent)?;
+            self.dirs.insert(parent.to_path_buf());
+        }
+        let tmp = target.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
+        let written = (|| -> std::io::Result<()> {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(data)?;
+            file.sync_all()
+        })();
+        // Local rename replaces an existing target atomically; the pipeline
+        // guarantees the target does not exist, so this is a plain publish.
+        if let Err(err) = written.and_then(|()| std::fs::rename(&tmp, &target)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
         }
         Ok(())
     }

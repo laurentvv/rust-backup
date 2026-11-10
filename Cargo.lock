@@ -6401,6 +6401,7 @@ dependencies = [
  "duckdb",
  "fastcdc",
  "filetime",
+ "flume",
  "rand 0.9.5",
  "russh",
  "russh-sftp",

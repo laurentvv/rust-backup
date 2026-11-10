@@ -638,7 +638,10 @@ fn run_job(
 ) -> anyhow::Result<(Uuid, rb_core::backup::BackupStats)> {
     let repo = open_repo(config, passphrase, false)?;
     let started = chrono_now();
+    let t0 = std::time::Instant::now();
     let mut files_done = 0u64;
+    let mut bytes_done = 0u64;
+    let mut last_progress = std::time::Instant::now();
 
     let result = rb_core::backup::run_backup(
         &repo,
@@ -649,7 +652,21 @@ fn run_job(
         },
         |event| {
             match event {
-                rb_core::backup::BackupEvent::FileDone { .. } => files_done += 1,
+                rb_core::backup::BackupEvent::FileDone { size, .. } => {
+                    files_done += 1;
+                    bytes_done += size;
+                    if last_progress.elapsed() >= std::time::Duration::from_millis(500) {
+                        last_progress = std::time::Instant::now();
+                        let secs = t0.elapsed().as_secs_f64().max(0.001);
+                        eprint!(
+                            "\r  {files_done} files | {:>8.1} MiB | {:>6.2} MiB/s  ",
+                            bytes_done as f64 / 1_048_576.0,
+                            bytes_done as f64 / 1_048_576.0 / secs
+                        );
+                        use std::io::Write as _;
+                        let _ = std::io::stderr().flush();
+                    }
+                }
                 rb_core::backup::BackupEvent::FileSkipped { path, reason } => {
                     eprintln!("skipped: {} ({reason})", path.display());
                 }
@@ -658,6 +675,8 @@ fn run_job(
             Ok(())
         },
     );
+    // Terminate the progress line (both on success and failure).
+    eprintln!();
 
     let (snapshot_id, stats) = match result {
         Ok((manifest, stats)) => (manifest.id, stats),
@@ -702,7 +721,12 @@ fn run_job(
         stats.bytes_total,
         stats.kind,
     )?;
-    let _ = files_done;
+    let elapsed = t0.elapsed().as_secs_f64().max(0.001);
+    let mib = stats.bytes_total as f64 / 1_048_576.0;
+    eprintln!(
+        "  done in {elapsed:.1}s — {files_done} files, {mib:.1} MiB, {:.2} MiB/s",
+        mib / elapsed
+    );
     Ok((snapshot_id, stats))
 }
 

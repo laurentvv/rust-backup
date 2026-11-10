@@ -3,7 +3,7 @@
 > Instructions for any AI coding agent working in this repository.
 > Structure: **common block** (delimited, resyncable) + **project-specific part** (free).
 
-<!-- BEGIN:agents-common v3.3 — block shared across repositories (agents-kit). Do not edit by hand: resync with scripts/sync_agents.py -->
+<!-- BEGIN:agents-common v3.4 — block shared across repositories (agents-kit). Do not edit by hand: resync with scripts/sync_agents.py -->
 <!-- The script only replaces what lies between the BEGIN/END markers; all repository-specific content is preserved -->
 
 > **Priority on conflict**: explicit user instruction > this repo's §7 > this common block. The §5 prohibitions are lifted only on a formal explicit request. This block is overwritten on every sync: add nothing here (lessons → §7, see §6).
@@ -13,7 +13,7 @@
 - Default machine: **Windows 11**, shell **Git Bash** — any deviation (PowerShell 7, WSL, Linux…) is declared in §7; use ONLY the declared shell's commands.
 - Python: **`uv` only** — never `pip install`, never `requirements.txt` (`uv add` / `uv run`).
 - Machine paths: never hardcoded — go through the project configuration (config.py / .env / dedicated section).
-- Code search: on large repositories (> 5k files, or a `.tgrep/` index folder present), prefer the fast indexed `tgrep` CLI from the PATH over recursive `grep`/`find` scans — `tgrep -- "pattern" .`, `tgrep -t <type> -- "pattern" .` (first use: `tgrep index .`; keep `.tgrep/` git-ignored). Below ~2k files, plain `git grep` is already instant.
+- Code search: on large repositories (> 5k files, or a `.tgrep/` index folder present), prefer the fast indexed `tgrep` CLI from the PATH over recursive `grep`/`find` scans — `tgrep -- "pattern" .` (first use: `tgrep index .`, keep `.tgrep/` git-ignored); below ~2k files, plain `git grep` is instant.
 - Text files: **UTF-8 without BOM**, line endings per `.gitattributes`. Never markdown exported or pasted from a rich editor (Notion, Word…): it arrives escaped and becomes unreadable for the agent.
 - Language: **English** for everything written in the repository (code, comments, docs, commit messages, ledger); **French** for chat replies to the user. Any deviation is declared in §7.
 - Long context (architecture, detailed lessons, ecosystem): see the repo's `PROJECT_MEMORY.md` or `docs/` — AGENTS.md stays deliberately short.
@@ -26,7 +26,7 @@ Never rely on the context window alone: it degrades, gets compressed, gets erase
 uv run --no-project .agents/skills/agent-state/scripts/state_agents.py [--repo PATH] <command>
 ```
 
-The dependency (`duckdb>=1.1.0`) is declared inside the script (PEP 723): uv builds and caches an isolated environment — no global install. Tables: `features` (pending | in_progress | completed), `contract_criteria` + `contract_meta` (frozen validation contract, 15-30 criteria, test command), `sprint_progress` (objective + milestones), `execution_log` (append-only event log; no rotation, no archive). **Proportionality**: the ledger is for feature suites — a question or a one-off fix does not open a sprint (one log entry is enough if the ledger exists). The database stays local: `.agent/` and `.agents/` are git-ignored from initialization and never committed (heavy binary, installed scripts — they would bloat public repositories and skew their language stats). A legacy 4-file ledger (`feature_list*.json`, `contract.md`, `progress.md`, `log.md`) is auto-migrated with backup on the first `bootstrap`.
+The dependency (`duckdb>=1.1.0`) is declared in the script (PEP 723): uv builds a cached isolated environment — no global install. Tables: `features` (pending | in_progress | completed), `contract_criteria` + `contract_meta` (frozen validation contract, 15-30 criteria, test command), `sprint_progress` (objective + milestones), `execution_log` (append-only event log; no rotation, no archive). **Proportionality**: the ledger is for feature suites — a question or a one-off fix does not open a sprint (one log entry if the ledger exists). The database stays local: `.agent/` and `.agents/` are git-ignored from initialization and never committed (heavy binary, installed scripts — they would bloat public repositories and skew their language stats). A legacy 4-file ledger (`feature_list*.json`, `contract.md`, `progress.md`, `log.md`) is auto-migrated with backup on the first `bootstrap`.
 
 1. **Bootstrap** — on every start, crash or restart, run `bootstrap`: bounded state (active features, sprint, contract, the last 20 log entries). Never query the full history unfiltered — use `search-log`.
 2. **Action** — `log <type> "<message>"` (type ∈ init | gen | eval | fix | sync | done | err, ~200 chars) at the start and at the end of each action.
@@ -57,6 +57,7 @@ The dependency (`duckdb>=1.1.0`) is declared inside the script (PEP 723): uv bui
 ## §5 Security & integrity
 
 - **No secrets** in code, commits, logs or on screen (user paths, e-mails, tokens) → env vars / dummy placeholders.
+- **No personal names in content**: never write a person's real name in repository files (READMEs, docs, code, package metadata, licenses, credits) — attribute to the project or a GitHub handle; identity lives only in git commit metadata. Fix existing occurrences on sight.
 - **Never delete** state files, databases, archives or business data. Any ambiguous deletion: **restate the list** to the user and get confirmation BEFORE executing.
 - **Never shut down/restart/sleep the machine** without a formal explicit request.
 - **Irreversible or external actions** (publishing, upload, PROD write, sending messages): first generate the control artifacts, then wait for explicit approval in the chat.
@@ -64,9 +65,9 @@ The dependency (`duckdb>=1.1.0`) is declared inside the script (PEP 723): uv bui
 
 ## §6 Truth & validation
 
-- **Read the upstream docs BEFORE acting** — before testing, debugging, upgrading or adopting any engine, model or third-party tool, fetch its official documentation into a scratch area and read the relevant pages: the upstream repo's `docs/` (many engines document one page per model/feature that the root README omits), model/dataset cards, `/llms.txt` endpoints (append `.md` to page URLs where supported). Never rely on memorized flags or assumed capabilities: wrong wirings, "not implemented" limits and hidden features (extra routes, options, quant formats) are routinely found there. Pin the doc version/commit at fetch time and cite it in the test verdict or decision.
+- **Read the upstream docs BEFORE acting** — before testing, debugging, upgrading or adopting any engine, model or tool, fetch its official docs and read the relevant pages: the upstream repo's `docs/` (one page per model/feature, often absent from the root README), model/dataset cards, `/llms.txt` endpoints (append `.md` to page URLs where supported). Never rely on memorized flags or assumed capabilities: wrong wirings, "not implemented" limits and hidden features are routinely found there. Pin the doc version/commit at fetch time and cite it in the test verdict or decision.
 - "Verified" = **actually executed** (exit 0) or **visually inspected** (screenshot/render looked at) — never inferred from code, intentions or logs.
-- Every factual claim (number, color, presence of an asset) is backed by a measurement or a screenshot kept as evidence.
+- Every factual claim is backed by a measurement or a screenshot kept as evidence.
 - After a fix: re-validate through the **real full path**, not through a harness that bypasses it.
 - **Never disable, skip or weaken a test** to get green; an unresolved failure or a skipped step is reported as is.
 - Documentation: any behavior change → update the repo's maintained docs before closing the task.
@@ -123,6 +124,9 @@ cargo run --locked
 - **[2026-11-07] MSVC linker memory under parallel test build** — on Windows with static DuckDB and heavy crypto dependencies, `cargo test --workspace` can hit `LNK1102: out of memory` if multiple integration test binaries link simultaneously; use `-j 2` for workspace test runs when memory constrained.
 - **[2026-11-07] GPUI async tasks & window borrow** — `window: &mut gpui::Window` is a temporary borrow during event dispatch and cannot escape into `cx.spawn(...)`; use `this.toast` + `this.auto_dismiss_toast(cx)` or `cx.spawn_in(window, ...)` when UI updates happen on async background completion.
 - **[2026-11-07] illustration pipeline** — brand illustrations come from the user's local generator at `C:\GIT\generator-assets` (CLI `uv run python main.py -w generate "<English prompt>" --seed <fixed> -o <name> -d <dir>`, run from that repo's root); ALWAYS run its load gate `uv run python scripts/check_charge_systeme.py` first (exit 1 = do not launch, never pipe it) and run one heavy generation at a time; it has no `.ico` export — reuse `.agent/scratch/make_ico.py`. Image-model licenses are not a concern for this local app (user decision).
+- **[2026-11-08] Git Bash mangles Unix-style CLI paths** — a flag value like `--sftp-root /mnt/backup/...` passed from Git Bash to a Windows exe is rewritten to `C:/Program Files/Git/mnt/...` (MSYS path conversion); it silently created a broken job (caught only by re-running `jobs list`). Prefix such commands with `MSYS_NO_PATHCONV=1` (or use `//mnt/...`, or run from PowerShell). ALWAYS verify job creation with `jobs list` afterward.
+- **[2026-11-08] SFTP throughput anatomy** — the v1 engine was 100% sequential (one thread: read→BLAKE3→zstd→AES→upload per ~1 MiB chunk) and paid ~13 SFTP round trips + a server fsync per chunk. On a LAN RTT<1 ms the dominant cost is the destination disk: the production target `/mnt/backup` is NTFS via ntfs-3g FUSE (slow fsync + metadata, single-threaded daemon). Measured live on the failed 24.9 GB run: 2.5 MB/s average, 0.1 MB/s on small files. `scp` is NOT a fix: OpenSSH ≥9.0 scp runs over SFTP.
+- **[2026-11-09] PERF-1 pipeline fix measured** — producer/consumer engine (walk thread → N compress/seal workers → M parallel SFTP writers with in-memory dedup index, no per-chunk ceremony, nodelay + 128 KiB write packets, 60 s request timeout): LAN bench on the same ntfs-3g destination went 299 s → 127 s (default 4 channels, ×2.35) → **71 s (×4.2, 14.7 MiB/s) with `RBACKUP_UPLOAD_WORKERS=8`**; 12 channels FAILS cleanly: OpenSSH `MaxSessions` (default 10) caps channels per connection — engine now fails fast with a dedicated hint. Remaining ceiling on that box is the ntfs-3g daemon, not the client. FUSE deletes are as slow as writes (~0.5 files/s): move big garbage aside (`mv`) instead of waiting on `rm -rf`, then purge in background.
 
 ### References
 - GUI: `.agents/skills/gpui-kit/SKILL.md` (pinned recipe, re-verified 2026-11-07 for 0.9.0) — official docs https://gpui-kit.com/docs, full-text agent dump https://gpui-kit.com/llms-full.txt (copy pinned in `.agent/scratch/upstream-docs/gpui-kit-0.9.0/`), component list https://gpui-kit.com/component

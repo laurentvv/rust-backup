@@ -1,14 +1,21 @@
 //! The backup engine: walk sources, chunk + dedup + store, finalize the
 //! snapshot manifest LAST.
 //!
+//! Storage runs as a pipeline: the walk thread only reads, chunks and
+//! hashes; worker threads compress/seal in parallel; upload writers with
+//! dedicated backend channels land the chunks. Dedup membership comes from
+//! an in-memory index built once per run, so the hot path never pays a
+//! network round trip to ask "does this chunk already exist?".
+//!
 //! Incremental behavior falls out of content-defined dedup: the first run
 //! stores every chunk (a full backup), later runs store only chunks whose
 //! content has never been seen — with a size+mtime fast path that avoids
 //! re-reading unchanged files entirely.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 
 use walkdir::WalkDir;
@@ -31,13 +38,16 @@ pub enum BackupEvent {
         /// Size in bytes.
         size: u64,
     },
-    /// A source file has been processed.
+    /// A source file has been processed (read, chunked, hashed and handed
+    /// to the storage pipeline — the chunks may still be in flight; they
+    /// are guaranteed landed when [`BackupEvent::SnapshotFinalized`]
+    /// fires).
     FileDone {
         /// Absolute path of the file.
         path: PathBuf,
         /// Size in bytes.
         size: u64,
-        /// Chunks newly stored for this file.
+        /// Chunks newly queued for storage for this file.
         new_chunks: u64,
         /// Uncompressed bytes of those new chunks.
         new_bytes: u64,
@@ -151,6 +161,10 @@ pub fn run_backup(
         ..Default::default()
     };
 
+    // One pipeline per run: in-memory chunk index + parallel compress/seal
+    // workers + parallel upload writers on dedicated backend channels.
+    let pipeline = ChunkPipeline::spawn(repo)?;
+
     for source_root in &job.sources {
         let root_key = source_root.to_string_lossy().to_string();
         let mut entries: Vec<FileEntry> = Vec::new();
@@ -242,7 +256,7 @@ pub fn run_backup(
                 continue;
             }
 
-            match backup_file(repo, abs, &chunker_cfg) {
+            match backup_file(&pipeline, abs, &chunker_cfg) {
                 Ok(mut result) => {
                     result.entry.path = rel.to_path_buf();
                     entries.push(result.entry);
@@ -280,6 +294,9 @@ pub fn run_backup(
         });
     }
 
+    // Every queued chunk must have landed before the manifest can exist.
+    pipeline.finish()?;
+
     // Finalize LAST: until this atomic write lands, the snapshot does not
     // exist for any reader (restores, verifies, listings).
     repo.write_manifest(&manifest)?;
@@ -299,7 +316,7 @@ struct FileBackup {
 
 /// Reads, chunks, dedups and stores one file.
 fn backup_file(
-    repo: &Repository,
+    pipeline: &ChunkPipeline,
     abs: &Path,
     chunker_cfg: &ChunkerConfig,
 ) -> crate::Result<FileBackup> {
@@ -329,7 +346,7 @@ fn backup_file(
         size += data.len() as u64;
         let hash = ChunkHash::from_data(&data);
         let plain_len = data.len() as u64;
-        if repo.store_chunk(&hash, &data)? {
+        if pipeline.submit(hash, data)? {
             new_chunks += 1;
             new_bytes += plain_len;
         }
@@ -353,6 +370,229 @@ fn is_cancelled(cancel: &Option<Arc<AtomicBool>>) -> bool {
     cancel
         .as_ref()
         .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Default parallel upload writers opened per run.
+const UPLOAD_WORKERS: usize = 4;
+
+/// Parallel upload writers opened per run. Several channels overlap the
+/// server-side fsync latency that dominates slow destinations; tunable
+/// through `RBACKUP_UPLOAD_WORKERS` (clamped to 1..=16). OpenSSH caps a
+/// single SSH connection at `MaxSessions` (default 10) channels including
+/// the control session, so values above ~8 need a raised server limit.
+fn upload_workers() -> usize {
+    std::env::var("RBACKUP_UPLOAD_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map_or(UPLOAD_WORKERS, |n| n.clamp(1, 16))
+}
+/// Chunks buffered between the walk thread and the compress/seal workers.
+/// Bounded so RAM stays sane even at the 4 MiB max chunk size.
+const RAW_QUEUE: usize = 24;
+/// Sealed blobs buffered between the compress/seal workers and the upload
+/// writers.
+const SEALED_QUEUE: usize = 12;
+/// Cap on compress/seal workers: compression is rarely the bottleneck past
+/// a dozen cores, and each worker holds one chunk of RAM.
+const MAX_COMPRESS_WORKERS: usize = 16;
+
+/// One chunk as cut by the walk thread, before compression.
+struct RawChunk {
+    hash: ChunkHash,
+    data: Vec<u8>,
+}
+
+/// One sealed chunk blob ready for upload.
+struct SealedChunk {
+    rel: String,
+    blob: Vec<u8>,
+}
+
+/// The storage pipeline of one backup run.
+///
+/// Topology: walk thread → [`RAW_QUEUE`] → N compress/seal workers →
+/// [`SEALED_QUEUE`] → [`UPLOAD_WORKERS`] upload writers (each with a
+/// dedicated backend channel). All queues are bounded: a slow destination
+/// applies backpressure to the walk instead of ballooning RAM.
+///
+/// Failure semantics: the first worker error is remembered and the worker
+/// exits; channel disconnects then cascade (senders observe the loss), so
+/// the walk thread aborts promptly with that error. Chunks already landed
+/// stay (harmless orphans, deduplicated later); no manifest is ever
+/// written for a failed run.
+struct ChunkPipeline {
+    raw_tx: flume::Sender<RawChunk>,
+    sealed_tx: flume::Sender<SealedChunk>,
+    /// Chunks known to exist (run-start index) or already submitted this
+    /// run — also the within-run dedup guard.
+    known: Arc<Mutex<HashSet<ChunkHash>>>,
+    first_error: Arc<Mutex<Option<crate::Error>>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl ChunkPipeline {
+    /// Builds the run-start chunk index and spawns the workers. Fails fast
+    /// when the backend cannot open the upload writers.
+    ///
+    /// # Errors
+    ///
+    /// Returns listing errors from the index build and connection errors
+    /// from writer creation.
+    fn spawn(repo: &Repository) -> crate::Result<Self> {
+        let known = Arc::new(Mutex::new(load_chunk_index(repo)?));
+        let first_error: Arc<Mutex<Option<crate::Error>>> = Arc::new(Mutex::new(None));
+        let (raw_tx, raw_rx) = flume::bounded(RAW_QUEUE);
+        let (sealed_tx, sealed_rx) = flume::bounded(SEALED_QUEUE);
+        let mut workers = Vec::new();
+
+        // Upload writers first: a backend that cannot open them fails the
+        // run before anything is read.
+        let backend = Arc::clone(repo.backend());
+        let wanted = upload_workers();
+        for worker_id in 0..wanted {
+            let mut writer = backend.open_writer().map_err(|e| {
+                crate::Error::Repo(format!(
+                    "opening upload writer {}/{}: {e} — the server may cap concurrent SFTP \
+                     channels (OpenSSH MaxSessions, default 10); lower RBACKUP_UPLOAD_WORKERS",
+                    worker_id + 1,
+                    wanted
+                ))
+            })?;
+            let rx: flume::Receiver<SealedChunk> = sealed_rx.clone();
+            let errors = Arc::clone(&first_error);
+            workers.push(std::thread::spawn(move || {
+                while let Ok(chunk) = rx.recv() {
+                    if let Err(e) = writer.write_new(&chunk.rel, &chunk.blob) {
+                        record_error(&errors, e);
+                        break;
+                    }
+                }
+            }));
+        }
+
+        let compress_workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let compress_workers = compress_workers.min(MAX_COMPRESS_WORKERS);
+        for _ in 0..compress_workers {
+            let repo = repo.clone();
+            let rx: flume::Receiver<RawChunk> = raw_rx.clone();
+            let tx: flume::Sender<SealedChunk> = sealed_tx.clone();
+            let errors = Arc::clone(&first_error);
+            workers.push(std::thread::spawn(move || {
+                while let Ok(chunk) = rx.recv() {
+                    let blob = match repo.seal_chunk_blob(&chunk.hash, &chunk.data) {
+                        Ok(blob) => blob,
+                        Err(e) => {
+                            record_error(&errors, e);
+                            break;
+                        }
+                    };
+                    let rel = Repository::chunk_rel(&chunk.hash);
+                    if tx.send(SealedChunk { rel, blob }).is_err() {
+                        break; // upload side gone; its error is recorded
+                    }
+                }
+            }));
+        }
+
+        Ok(Self {
+            raw_tx,
+            sealed_tx,
+            known,
+            first_error,
+            workers,
+        })
+    }
+
+    /// Offers one chunk to the pipeline.
+    ///
+    /// Returns `Ok(true)` when the chunk is new (queued for upload —
+    /// counting it as stored is safe because a later failure aborts the
+    /// whole run before any manifest exists) and `Ok(false)` when the chunk
+    /// was already known, in which case nothing is sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first worker error (or a disconnect error when workers
+    /// stopped unexpectedly).
+    fn submit(&self, hash: ChunkHash, data: Vec<u8>) -> crate::Result<bool> {
+        {
+            let mut known = lock(&self.known);
+            if known.contains(&hash) {
+                return Ok(false);
+            }
+            known.insert(hash);
+        }
+        if self.raw_tx.send(RawChunk { hash, data }).is_err() {
+            return Err(self.take_error().unwrap_or_else(|| {
+                crate::Error::Repo("chunk pipeline stopped unexpectedly".into())
+            }));
+        }
+        Ok(true)
+    }
+
+    /// Waits for every submitted chunk to land, then reports the first
+    /// worker error, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first worker error recorded during the run.
+    fn finish(self) -> crate::Result<()> {
+        // Dropping the senders disconnects the queues; workers drain what
+        // is left and exit, and join() waits for all of them.
+        let Self {
+            raw_tx,
+            sealed_tx,
+            known: _,
+            first_error,
+            workers,
+        } = self;
+        drop(raw_tx);
+        drop(sealed_tx);
+        for handle in workers {
+            let _ = handle.join();
+        }
+        lock(&first_error).take().map_or(Ok(()), Err)
+    }
+
+    fn take_error(&self) -> Option<crate::Error> {
+        lock(&self.first_error).take()
+    }
+}
+
+/// Remembers the first error; later ones are dropped (the run reports the
+/// root cause, not the cascade).
+fn record_error(slot: &Mutex<Option<crate::Error>>, error: crate::Error) {
+    let mut slot = lock(slot);
+    if slot.is_none() {
+        *slot = Some(error);
+    }
+}
+
+/// Poisoning only happens on a panic, and a panicking worker means the run
+/// is broken anyway: take the guard, report through normal errors.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Snapshot of every chunk the repository already holds, built once per
+/// run. Malformed names (temp files, foreign files) are skipped: they are
+/// not valid chunks and must not shadow a real hash.
+fn load_chunk_index(repo: &Repository) -> crate::Result<HashSet<ChunkHash>> {
+    let mut index = HashSet::new();
+    for rel in repo.list_chunks()? {
+        let Some((name, _)) = rel.rsplit_once('/') else {
+            continue;
+        };
+        let Some(hex) = name.strip_suffix(".chunk") else {
+            continue;
+        };
+        if let Ok(hash) = ChunkHash::from_hex(hex) {
+            index.insert(hash);
+        }
+    }
+    Ok(index)
 }
 
 fn mtime_ns(meta: &std::fs::Metadata) -> i64 {

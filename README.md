@@ -95,21 +95,36 @@ Whether backing up directly to external USB drives, local NVMe volumes, or offsi
 
 ### 🔀 SFTP Pipeline Throughput (LAN, NTFS-via-FUSE destination)
 
-*Same synthetic corpus (805 files, 1.04 GiB, 1 221 chunks) to `root@192.168.1.102:/mnt/backup` (NTFS mounted through ntfs-3g on Linux), RTT < 1 ms:*
+*Synthetic corpus (805 files, 1.04 GiB, 1 221 chunks) to a LAN server whose backup disk is a
+USB 3 TB HDD mounted as NTFS through ntfs-3g on Linux, RTT < 1 ms:*
 
-| Engine | Parallel upload channels | Wall time | Average throughput |
+| Engine | Parallel upload writers | Wall time | Average throughput |
 | :-- | :--- | :--- | :--- |
 | v1 sequential (per-chunk SFTP round trips) | 1 | 299 s | 3.5 MiB/s |
-| **v2 pipeline (default)** | **4** | **127 s** | **8.2 MiB/s** |
-| **v2 pipeline, `RBACKUP_UPLOAD_WORKERS=8`** | **8** | **71 s** | **14.7 MiB/s** (peaks 28.7) |
+| v2 pipeline (per-chunk fsync) | 4 | 127 s | 8.2 MiB/s |
+| v2 pipeline (per-chunk fsync), `RBACKUP_UPLOAD_WORKERS=8` | 8 | 71 s | 14.7 MiB/s |
+| **v2 pipeline, batched durability + one SSH connection per writer** | **8** | **64.5 s** | **16.1 MiB/s** |
+
+*Small-file corpus (4 000 files of 4-128 KiB, 256 MiB), same server:* 45.5 s with per-chunk
+fsync (4 writers) → **25.8 s** with batched durability and 8 writers. Reproduce with
+`scripts/make_bench_corpus.py` + `scripts/bench_sftp.sh`.
+
+On that destination the remaining ceiling is physical: the USB HDD writes ~60 MB/s
+sequentially and accepts ~170 new files/s through ntfs-3g whatever the client (measured
+with an independent SFTP client), so many small chunk files and several interleaved
+streams are what costs time — not the client CPU, which stays mostly idle.
 
 The storage engine pipelines: the walk thread only reads/chunks/hashes, worker threads
-compress and seal in parallel (all CPU cores), and dedicated SFTP channels upload and
-fsync concurrently. Dedup membership comes from an in-memory index built once per run —
-no per-chunk existence round trip. Per-chunk durability is unchanged (temp write → fsync →
-rename; manifests still finalized last). `RBACKUP_UPLOAD_WORKERS` is clamped to 16; note
-OpenSSH's `MaxSessions` (default 10, one is the control channel) caps channels per
-connection.
+compress and seal in parallel (all CPU cores), and parallel upload writers — each on its
+own SSH connection — store the chunks. Dedup membership comes from an in-memory index built
+once per run — no per-chunk existence round trip. Durability is batched over SFTP: chunks
+are written under temp names without a per-chunk fsync, one remote `sync` per batch makes
+them durable, then the batch is renamed into place (manifests still finalized last;
+accounts limited to SFTP fall back to a per-chunk fsync, `RBACKUP_SFTP_DURABILITY=fsync`
+forces it — see `docs/REPO_FORMAT.md`). `RBACKUP_UPLOAD_WORKERS` is clamped to 32;
+`RBACKUP_SFTP_WRITERS=channel` puts the writers back on one shared connection (then
+OpenSSH's `MaxSessions`, default 10, caps them). `RBACKUP_PROFILE=1` prints per-stage
+timings at the end of a run.
 
 ---
 

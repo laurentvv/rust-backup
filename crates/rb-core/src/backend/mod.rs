@@ -95,14 +95,34 @@ pub trait StorageBackend: Send + Sync {
 /// Unlike [`StorageBackend::write_atomic`], `write_new` skips the existence
 /// check and the per-segment directory probing: the pipeline already knows
 /// (in-memory chunk index + exclusive repository lock) that the target is
-/// absent, and the writer caches directories it has created. Durability is
-/// identical: temp name, flush to stable storage, rename into place.
+/// absent, and the writer caches directories it has created.
+///
+/// Durability contract (shared by every implementation):
+/// - a chunk is NEVER visible under its final name before its bytes are on
+///   stable storage (temp name, flush, then rename);
+/// - once [`ChunkWriter::finish`] returns `Ok`, every chunk passed to
+///   `write_new` is durable under its final name.
+///
+/// Implementations may defer the flush and the rename of several chunks to
+/// one batched barrier (SFTP with remote `sync`), which is why the final
+/// name may only appear after a later `write_new` or `finish` call.
 pub trait ChunkWriter: Send {
-    /// Atomically and durably writes `data` to `rel`, which must not exist
-    /// yet. On failure the temp file is removed (best effort).
+    /// Writes `data` to `rel`, which must not exist yet, under the contract
+    /// above. On failure the temp file is removed (best effort).
     ///
     /// # Errors
     ///
-    /// Returns IO errors as usual; nothing partial is left behind.
+    /// Returns IO errors as usual; nothing partial is left under `rel`.
     fn write_new(&mut self, rel: &str, data: &[u8]) -> crate::Result<()>;
+
+    /// Makes every chunk written so far durable under its final name.
+    /// Must be called once after the last `write_new` and before anything
+    /// (a snapshot manifest) refers to those chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns IO errors from the deferred flush or renames.
+    fn finish(&mut self) -> crate::Result<()> {
+        Ok(())
+    }
 }

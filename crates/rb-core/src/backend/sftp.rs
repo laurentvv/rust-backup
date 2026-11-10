@@ -2,7 +2,8 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -47,9 +48,14 @@ pub struct SftpConnect {
 pub struct SftpBackend {
     runtime: Arc<tokio::runtime::Runtime>,
     sftp: Arc<SftpSession>,
-    /// Live SSH connection: parallel chunk writers open extra SFTP channels
-    /// on it instead of paying a full connect+auth each.
+    /// Live SSH connection (control SFTP channel + durability barrier).
     session: Arc<russh::client::Handle<ClientHandler>>,
+    /// Connection parameters, kept to open one extra SSH connection per
+    /// parallel chunk writer (see [`WriterTransport`]).
+    params: Arc<SftpConnect>,
+    /// Remote durability barrier shared by every chunk writer, probed once
+    /// on the first `open_writer` (`None` = per-chunk fsync fallback).
+    barrier: Arc<OnceLock<Option<Arc<RemoteBarrier>>>>,
     remote_root: String,
     description: String,
 }
@@ -73,7 +79,7 @@ impl SftpBackend {
     /// and host-key failures.
     pub fn connect(params: &SftpConnect) -> crate::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+            .worker_threads(4)
             .enable_all()
             .build()
             .map_err(|e| crate::Error::Io(std::io::Error::other(e.to_string())))?;
@@ -83,6 +89,8 @@ impl SftpBackend {
             runtime: Arc::new(runtime),
             sftp: Arc::new(sftp),
             session: Arc::new(session),
+            params: Arc::new(params.clone()),
+            barrier: Arc::new(OnceLock::new()),
             remote_root: params.remote_root.clone(),
             description: format!(
                 "sftp: {}@{}:{}",
@@ -100,6 +108,32 @@ impl SftpBackend {
         let sftp = Arc::clone(&self.sftp);
         self.runtime.block_on(async move { sftp.close().await })?;
         Ok(())
+    }
+
+    /// Chunk durability mode used by the parallel writers of this
+    /// connection: `"batched-sync"` (remote `sync` barrier per batch) or
+    /// `"per-chunk-fsync"`. Probes the server on first call.
+    #[must_use]
+    pub fn chunk_durability(&self) -> &'static str {
+        if self.barrier().is_some() {
+            "batched-sync"
+        } else {
+            "per-chunk-fsync"
+        }
+    }
+
+    fn barrier(&self) -> Option<Arc<RemoteBarrier>> {
+        self.barrier
+            .get_or_init(|| {
+                if std::env::var(DURABILITY_ENV).is_ok_and(|v| v.eq_ignore_ascii_case("fsync")) {
+                    return None;
+                }
+                let session = Arc::clone(&self.session);
+                self.runtime
+                    .block_on(async move { RemoteBarrier::open(&session).await })
+                    .map(Arc::new)
+            })
+            .clone()
     }
 
     fn remote_path(&self, rel: &str) -> String {
@@ -230,17 +264,170 @@ impl StorageBackend for SftpBackend {
     }
 
     fn open_writer(&self) -> crate::Result<Box<dyn ChunkWriter>> {
-        let session = Arc::clone(&self.session);
-        let sftp = self
-            .runtime
-            .block_on(async { open_sftp_channel(&session).await })?;
+        // Probe (once) before opening the writer channel so the barrier
+        // channel gets its slot on the shared connection.
+        let barrier = self.barrier();
+        let (sftp, connection) = match WriterTransport::from_env() {
+            WriterTransport::Connection => {
+                let params = Arc::clone(&self.params);
+                let (sftp, session) = self
+                    .runtime
+                    .block_on(async move { connect_inner(&params).await })?;
+                (sftp, Some(session))
+            }
+            WriterTransport::Channel => {
+                let session = Arc::clone(&self.session);
+                let sftp = self
+                    .runtime
+                    .block_on(async { open_sftp_channel(&session).await })?;
+                (sftp, None)
+            }
+        };
         Ok(Box::new(SftpChunkWriter {
             runtime: Arc::clone(&self.runtime),
             sftp: Arc::new(sftp),
+            _connection: connection,
             remote_root: self.remote_root.clone(),
             dirs: HashSet::new(),
+            barrier,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            renamed_since_sync: false,
+            op_times: OpTimes::default(),
         }))
     }
+}
+
+/// How each parallel chunk writer reaches the server.
+///
+/// Default **connection**: one dedicated SSH connection (own TCP stream)
+/// per writer. OpenSSH does not set `TCP_NODELAY` on non-interactive
+/// sessions, so when several SFTP channels share ONE TCP stream the
+/// server's small replies queue behind each other's delayed ACKs (Nagle);
+/// separate streams keep each writer in plain request/reply ping-pong and
+/// also lift the per-connection `MaxSessions` channel cap. `channel` keeps
+/// every writer on the shared connection
+/// (`RBACKUP_SFTP_WRITERS=channel`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterTransport {
+    Connection,
+    Channel,
+}
+
+impl WriterTransport {
+    fn from_env() -> Self {
+        match std::env::var("RBACKUP_SFTP_WRITERS") {
+            Ok(v) if v.eq_ignore_ascii_case("channel") => Self::Channel,
+            _ => Self::Connection,
+        }
+    }
+}
+
+/// Environment override: `RBACKUP_SFTP_DURABILITY=fsync` forces the
+/// per-chunk fsync path even when the server allows the batched barrier.
+const DURABILITY_ENV: &str = "RBACKUP_SFTP_DURABILITY";
+/// Deferred chunks per writer before a barrier + rename batch.
+const BARRIER_BATCH_CHUNKS: usize = 256;
+/// Deferred bytes per writer before a barrier + rename batch.
+const BARRIER_BATCH_BYTES: usize = 128 * 1024 * 1024;
+/// First line printed by the remote barrier loop once it runs.
+const BARRIER_READY: &str = "rbackup-barrier-ready";
+/// Remote barrier loop: one `sync` per request line, answered `ok`/`fail`.
+/// Plain POSIX shell, run through the login shell of the SSH user.
+const BARRIER_COMMAND: &str = "echo rbackup-barrier-ready; while read -r _; do if sync; then echo ok; else echo fail; fi; done";
+const BARRIER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A global `sync` may have to flush a lot of dirty data on a slow disk.
+const BARRIER_SYNC_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Server-wide durability barrier: a long-lived exec channel running a
+/// tiny `sync` loop. One `sync(2)` flushes every file the writers closed,
+/// which replaces one server fsync per chunk (the dominant cost on slow
+/// filesystems such as NTFS through ntfs-3g FUSE).
+///
+/// Unavailable when the account cannot run commands (for example a key
+/// restricted with `command="internal-sftp"`): the probe then fails and the
+/// writers keep the per-chunk fsync path.
+struct RemoteBarrier {
+    channel: tokio::sync::Mutex<BarrierChannel>,
+}
+
+struct BarrierChannel {
+    channel: russh::Channel<russh::client::Msg>,
+    buf: Vec<u8>,
+}
+
+impl BarrierChannel {
+    /// Reads one newline-terminated line of the remote loop's stdout.
+    async fn read_line(&mut self) -> crate::Result<String> {
+        loop {
+            if let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = self.buf.drain(..=pos).collect();
+                return Ok(String::from_utf8_lossy(&line).trim().to_string());
+            }
+            match self.channel.wait().await {
+                Some(russh::ChannelMsg::Data { data }) => self.buf.extend_from_slice(&data),
+                Some(
+                    russh::ChannelMsg::Failure
+                    | russh::ChannelMsg::Eof
+                    | russh::ChannelMsg::Close
+                    | russh::ChannelMsg::ExitStatus { .. }
+                    | russh::ChannelMsg::ExitSignal { .. },
+                )
+                | None => return Err(barrier_error("remote sync channel closed")),
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+impl RemoteBarrier {
+    /// Starts the remote loop and waits for its ready line; `None` when the
+    /// server refuses or never answers (the channel is closed again).
+    async fn open(session: &russh::client::Handle<ClientHandler>) -> Option<Self> {
+        let channel = tokio::time::timeout(BARRIER_PROBE_TIMEOUT, session.channel_open_session())
+            .await
+            .ok()?
+            .ok()?;
+        let mut ch = BarrierChannel {
+            channel,
+            buf: Vec::new(),
+        };
+        let ready = tokio::time::timeout(BARRIER_PROBE_TIMEOUT, async {
+            ch.channel.exec(true, BARRIER_COMMAND).await.ok()?;
+            let line = ch.read_line().await.ok()?;
+            Some(line == BARRIER_READY)
+        })
+        .await;
+        if matches!(ready, Ok(Some(true))) {
+            Some(Self {
+                channel: tokio::sync::Mutex::new(ch),
+            })
+        } else {
+            let _ = ch.channel.close().await;
+            None
+        }
+    }
+
+    /// Runs one remote `sync` and waits for it to complete.
+    async fn sync(&self) -> crate::Result<()> {
+        let mut ch = self.channel.lock().await;
+        tokio::time::timeout(BARRIER_SYNC_TIMEOUT, async {
+            ch.channel
+                .data(&b"s\n"[..])
+                .await
+                .map_err(|e| barrier_error(&format!("remote sync request: {e}")))?;
+            match ch.read_line().await?.as_str() {
+                "ok" => Ok(()),
+                other => Err(barrier_error(&format!("remote sync failed ({other})"))),
+            }
+        })
+        .await
+        .map_err(|_| barrier_error("remote sync timed out"))?
+    }
+}
+
+fn barrier_error(msg: &str) -> crate::Error {
+    crate::Error::Io(std::io::Error::other(msg.to_string()))
 }
 
 /// Parallel chunk writer over a dedicated SFTP channel.
@@ -249,13 +436,73 @@ impl StorageBackend for SftpBackend {
 /// per call: no existence probe (the pipeline's in-memory index plus the
 /// exclusive repository lock guarantee the target is absent) and no
 /// per-segment directory probing after the first write into a prefix
-/// directory. Durability is unchanged: temp name, `fsync@openssh.com`,
-/// rename.
+/// directory.
+///
+/// Durability follows the [`ChunkWriter`] contract in one of two modes:
+/// - **batched sync** (server allows the [`RemoteBarrier`]): chunks are
+///   written and closed under a temp name WITHOUT fsync; every
+///   [`BARRIER_BATCH_CHUNKS`] chunks / [`BARRIER_BATCH_BYTES`] bytes one
+///   remote `sync` makes the batch durable, then the batch is renamed into
+///   place; `finish` flushes the last batch and syncs once more so the
+///   renames are durable before the manifest is written. A crash leaves
+///   only temp files (ignored by the chunk index, swept by prune).
+/// - **per-chunk fsync** (fallback): temp name, `fsync@openssh.com`, rename.
 struct SftpChunkWriter {
     runtime: Arc<tokio::runtime::Runtime>,
     sftp: Arc<SftpSession>,
+    /// Dedicated SSH connection of this writer (kept alive while it
+    /// writes); `None` when the writer is a channel on the shared session.
+    _connection: Option<russh::client::Handle<ClientHandler>>,
     remote_root: String,
     dirs: HashSet<String>,
+    barrier: Option<Arc<RemoteBarrier>>,
+    /// Closed-but-unsynced chunks of the current batch: `(temp, final)`.
+    pending: Vec<(String, String)>,
+    pending_bytes: usize,
+    /// Renames done since the last barrier (batched mode).
+    renamed_since_sync: bool,
+    /// Per-operation timings, reported with `RBACKUP_PROFILE`.
+    op_times: OpTimes,
+}
+
+/// Cumulative per-operation timings of one SFTP chunk writer (seconds).
+#[derive(Default)]
+struct OpTimes {
+    chunks: u64,
+    mkdir: f64,
+    open: f64,
+    write: f64,
+    close: f64,
+    batch: f64,
+}
+
+impl SftpChunkWriter {
+    /// Batched mode: one remote `sync`, then rename the whole batch.
+    fn flush_batch(&mut self) -> crate::Result<()> {
+        let Some(barrier) = self.barrier.clone() else {
+            return Ok(());
+        };
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let batch = std::mem::take(&mut self.pending);
+        self.pending_bytes = 0;
+        let sftp = Arc::clone(&self.sftp);
+        let started = std::time::Instant::now();
+        let flushed = self.runtime.block_on(async move {
+            barrier.sync().await?;
+            for (tmp, path) in &batch {
+                // SFTP v3 rename refuses an existing target: a target that
+                // already exists despite the index is a bug worth failing on.
+                sftp.rename(tmp, path).await?;
+            }
+            Ok::<(), crate::Error>(())
+        });
+        self.op_times.batch += started.elapsed().as_secs_f64();
+        flushed?;
+        self.renamed_since_sync = true;
+        Ok(())
+    }
 }
 
 impl ChunkWriter for SftpChunkWriter {
@@ -271,11 +518,16 @@ impl ChunkWriter for SftpChunkWriter {
 
         let sftp = Arc::clone(&self.sftp);
         let mkdir_parent = parent.clone();
+        let batched = self.barrier.is_some();
+        let times = &mut self.op_times;
         let result = self.runtime.block_on(async {
+            let t = std::time::Instant::now();
             if need_mkdirs && let Some(parent) = &mkdir_parent {
                 mkdirs_remote(&sftp, parent).await?;
             }
+            times.mkdir += t.elapsed().as_secs_f64();
             let written: crate::Result<()> = async {
+                let t = std::time::Instant::now();
                 let mut file = sftp
                     .open_with_flags(
                         &tmp,
@@ -284,13 +536,22 @@ impl ChunkWriter for SftpChunkWriter {
                             | russh_sftp::protocol::OpenFlags::TRUNCATE,
                     )
                     .await?;
+                times.open += t.elapsed().as_secs_f64();
+                let t = std::time::Instant::now();
                 file.write_all(data).await?;
-                file.sync_all().await?;
+                times.write += t.elapsed().as_secs_f64();
+                let t = std::time::Instant::now();
+                if !batched {
+                    file.sync_all().await?;
+                }
                 file.shutdown().await?;
-                // SFTP v3 rename refuses an existing target, which is
-                // exactly the wanted behavior here: a target that already
-                // exists despite the index would be a bug worth failing on.
-                sftp.rename(&tmp, &path).await?;
+                times.close += t.elapsed().as_secs_f64();
+                if !batched {
+                    // SFTP v3 rename refuses an existing target, which is
+                    // exactly the wanted behavior here: a target that
+                    // already exists despite the index would be a bug.
+                    sftp.rename(&tmp, &path).await?;
+                }
                 Ok(())
             }
             .await;
@@ -306,7 +567,39 @@ impl ChunkWriter for SftpChunkWriter {
         {
             self.dirs.insert(parent);
         }
-        result
+        result?;
+        self.op_times.chunks += 1;
+        if batched {
+            self.pending.push((tmp, path));
+            self.pending_bytes += data.len();
+            if self.pending.len() >= BARRIER_BATCH_CHUNKS
+                || self.pending_bytes >= BARRIER_BATCH_BYTES
+            {
+                self.flush_batch()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> crate::Result<()> {
+        self.flush_batch()?;
+        if let Some(barrier) = self.barrier.clone()
+            && self.renamed_since_sync
+        {
+            // Make the renames themselves durable before any manifest
+            // refers to these chunks.
+            self.runtime.block_on(async move { barrier.sync().await })?;
+            self.renamed_since_sync = false;
+        }
+        if std::env::var_os("RBACKUP_PROFILE").is_some() {
+            let t = &self.op_times;
+            eprintln!(
+                "sftp writer: {} chunks | mkdir {:.2}s | open {:.2}s | write {:.2}s | close {:.2}s | \
+                 batches {:.2}s",
+                t.chunks, t.mkdir, t.open, t.write, t.close, t.batch
+            );
+        }
+        Ok(())
     }
 }
 

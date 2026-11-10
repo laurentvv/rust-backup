@@ -4,3 +4,9 @@
 /target
 .tgrep/
 .zcode/
+
+# Local secrets and demo data (never commit)
+.env
+*.duckdb
+known_hosts
+*.log

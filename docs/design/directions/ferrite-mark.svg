@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Ferrite: a toroidal ferrite core with an air gap and three copper-less steel windings -->
+  <defs>
+    <linearGradient id="fe-ox" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F49A66"/>
+      <stop offset="0.55" stop-color="#E0622D"/>
+      <stop offset="1" stop-color="#8E3417"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#141518"/>
+  <circle cx="32" cy="32" r="17" fill="none" stroke="url(#fe-ox)" stroke-width="9"
+          stroke-dasharray="96.8 10" transform="rotate(-28 32 32)"/>
+  <g stroke="#C9CED6" stroke-width="2.6" stroke-linecap="square">
+    <line x1="23.3" y1="37" x2="11.2" y2="44"/>
+    <line x1="22.3" y1="34.6" x2="8.8" y2="38.2"/>
+    <line x1="22" y1="32" x2="8" y2="32"/>
+  </g>
+</svg>

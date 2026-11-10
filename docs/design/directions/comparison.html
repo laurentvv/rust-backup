@@ -1,0 +1,600 @@
+<title>RustBackup Brand Directions</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=JetBrains+Mono:wght@400;600&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap">
+<style>
+/* Layout: a neutral review board. Shared chrome stays quiet so the three directions carry all the color.
+   Order: overview strip (3 columns) -> one full-width section per direction (mockup + system) -> decision matrix. */
+:root {
+  --bg: #F4F4F2;
+  --panel: #FFFFFF;
+  --fg: #1C1D1F;
+  --muted: #5D6066;
+  --line: #DEDDD8;
+  --focus: #2F55B5;
+  --f-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --f-disp: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #141516; --panel: #1C1D1F; --fg: #ECEBE7; --muted: #A2A5AA; --line: #2E3033; --focus: #9DB4F0; color-scheme: dark } }
+:root[data-theme="dark"] { --bg: #141516; --panel: #1C1D1F; --fg: #ECEBE7; --muted: #A2A5AA; --line: #2E3033; --focus: #9DB4F0; color-scheme: dark }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.55 var(--f-ui); }
+.wrap { max-width: 1180px; margin: 0 auto; padding-block: 40px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+h1 { font: 600 34px/1.15 var(--f-disp); letter-spacing: -0.01em; }
+h2 { font: 600 24px/1.25 var(--f-disp); }
+h3 { font: 600 13px/1.3 var(--f-ui); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 10px; }
+p { margin: 0; max-width: 68ch; }
+.lede { color: var(--muted); margin-top: 10px; font-size: 16px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 14px; font-size: 13px; color: var(--muted); }
+code { font: 12.5px var(--f-mono); }
+a { color: var(--focus); }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* overview strip */
+.strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 32px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; min-width: 0; }
+.ov-head { display: flex; align-items: center; gap: 14px; }
+.ov-head svg { width: 48px; height: 48px; flex: none; }
+.ov-name { font: 600 20px/1.2 var(--f-disp); }
+.ov-tag { font-size: 13px; color: var(--muted); }
+.ov-card p { margin-top: 12px; font-size: 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.chip { font-size: 12px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); }
+.ov-card a { display: inline-block; margin-top: 14px; font-size: 13px; }
+
+/* direction section */
+.dir { margin-top: 56px; padding-top: 32px; border-top: 1px solid var(--line); }
+.dir-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; }
+.dir-head .names { font-size: 13px; color: var(--muted); margin-top: 6px; }
+.toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.toggle button { font: 500 13px var(--f-ui); color: var(--muted); background: none; border: 0; padding: 7px 14px; cursor: pointer; }
+.toggle button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.thesis { margin-top: 14px; font-size: 16px; }
+.stage { margin-top: 20px; overflow-x: auto; border-radius: 12px; }
+.sys { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.sys .card { padding: 16px; }
+.sys p, .sys li { font-size: 13.5px; }
+.sys ul { margin: 0; padding-left: 18px; }
+.marks { display: flex; align-items: flex-end; gap: 14px; }
+.marks svg { flex: none; }
+.swatches { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; margin-top: 6px; }
+.sw { aspect-ratio: 1; border-radius: 4px; border: 1px solid rgba(128,128,128,.25); max-width: 100%; }
+.swl { font: 10.5px/1.3 var(--f-mono); color: var(--muted); margin-top: 8px; }
+.vignette { width: 100%; height: auto; max-width: 100%; margin-top: 6px; border-radius: 8px; display: block; }
+.icons { display: flex; gap: 12px; margin-top: 4px; }
+.icons svg { width: 22px; height: 22px; }
+
+/* matrix */
+.matrix-wrap { overflow-x: auto; margin-top: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; min-width: 720px; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; font-size: 13px; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.score { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rec { margin-top: 18px; }
+
+/* ============ MOCKUP SHARED SKELETON ============ */
+.mock { width: 940px; height: 560px; display: grid; grid-template-rows: 40px 1fr; overflow: hidden;
+  background: var(--m-bg); color: var(--m-text); font-family: var(--m-body); border-radius: var(--m-win-r);
+  box-shadow: 0 18px 48px rgba(0,0,0,.18), 0 0 0 1px var(--m-line); font-size: 13px; line-height: 1.45; }
+.m-title { display: flex; align-items: center; gap: 10px; padding: 0 0 0 14px; background: var(--m-title); }
+.m-title .lg { width: 18px; height: 18px; }
+.m-app { font-weight: 600; }
+.m-sp { flex: 1; }
+.m-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 10px; border-radius: 99px;
+  background: var(--m-chip); color: var(--m-text); }
+.m-state i { width: 7px; height: 7px; border-radius: 50%; background: var(--m-ok); display: block; }
+.m-wc { display: flex; height: 100%; }
+.m-wc span { width: 46px; display: grid; place-items: center; color: var(--m-muted); font-size: 12px; }
+.m-body { display: grid; grid-template-columns: 196px 1fr; min-height: 0; }
+.m-nav { background: var(--m-side); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+.m-nav a { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: var(--m-r-sm);
+  color: var(--m-muted); text-decoration: none; font-size: 13px; position: relative; }
+.m-nav a svg { width: 18px; height: 18px; }
+.m-nav a.on { color: var(--m-text); background: var(--m-nav-on); }
+.m-nav .foot { margin-top: auto; padding: 10px; font-size: 11px; color: var(--m-muted); }
+.m-main { background: var(--m-content); padding: 22px 24px; display: flex; flex-direction: column; gap: 16px; min-width: 0; overflow: hidden;
+  border-top-left-radius: var(--m-content-r); border-left: 1px solid var(--m-content-edge); border-top: 1px solid var(--m-content-edge); }
+.ico { fill: none; stroke: currentColor; stroke-width: var(--m-stroke, 1.6); stroke-linecap: var(--m-cap, round); stroke-linejoin: round; }
+.btn { font: 600 12.5px var(--m-body); border-radius: var(--m-r-sm); padding: 7px 14px; border: 1px solid transparent; cursor: default; white-space: nowrap; }
+.btn.pri { background: var(--m-pri); color: var(--m-on-pri); }
+.btn.sec { background: transparent; color: var(--m-text); border-color: var(--m-line); }
+.jobs { display: grid; gap: 0; border: 1px solid var(--m-line); border-radius: var(--m-r); background: var(--m-surface); overflow: hidden; }
+.job { display: grid; grid-template-columns: 22px 1.4fr 1fr 0.9fr 70px; align-items: center; gap: 12px; padding: 9px 14px; border-top: 1px solid var(--m-line); }
+.job:first-child { border-top: 0; }
+.job svg { width: 18px; height: 18px; color: var(--m-muted); }
+.job .n { font-weight: 600; }
+.job .s { color: var(--m-muted); font-size: 12px; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.ok { background: var(--m-ok); } .warn { background: var(--m-warn); } .bad { background: var(--m-bad); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* ============ FERRITE ============ */
+.m-ferrite { --m-win-r: 8px; --m-r: 3px; --m-r-sm: 2px; --m-content-r: 0; --m-stroke: 1.75; --m-cap: square;
+  --m-body: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+.m-ferrite[data-mode="dark"] { --m-bg: #0F1012; --m-title: #0F1012; --m-side: #0F1012; --m-content: #141518; --m-content-edge: #24272B;
+  --m-surface: #17191C; --m-line: #2A2D32; --m-text: #E8E4DD; --m-muted: #8E9196; --m-chip: #1F2226; --m-nav-on: #1F2226;
+  --m-acc: #F08A55; --m-pri: #E8703A; --m-on-pri: #140C08; --m-mag: #7F95A8;
+  --m-ok: #6CC08A; --m-warn: #E3B341; --m-bad: #F05D5D; --m-cell: #22252A; }
+.m-ferrite[data-mode="light"] { --m-bg: #E9E8E4; --m-title: #E9E8E4; --m-side: #E9E8E4; --m-content: #F6F5F2; --m-content-edge: #D3D1CB;
+  --m-surface: #FFFFFF; --m-line: #D9D7D1; --m-text: #17191C; --m-muted: #5E6168; --m-chip: #DCDAD5; --m-nav-on: #DCDAD5;
+  --m-acc: #B4441C; --m-pri: #B4441C; --m-on-pri: #FFFFFF; --m-mag: #4A6175;
+  --m-ok: #2E7D4F; --m-warn: #9A6700; --m-bad: #C42B2B; --m-cell: #E4E2DD; }
+.m-ferrite .m-app { font: 800 15px/1 "Big Shoulders Display", "Bahnschrift", sans-serif; letter-spacing: .12em; text-transform: uppercase; }
+.m-ferrite .m-nav a.on::before { content: ""; position: absolute; left: -8px; top: 6px; bottom: 6px; width: 3px; background: var(--m-acc); }
+.m-ferrite .m-nav a.on svg { color: var(--m-acc); }
+.fe-hero { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: end; padding-bottom: 14px; border-bottom: 1px solid var(--m-line); }
+.fe-kicker { font: 600 11px var(--f-mono); letter-spacing: .14em; color: var(--m-acc); }
+.fe-big { font: 800 44px/0.95 "Big Shoulders Display", "Bahnschrift", sans-serif; text-transform: uppercase; letter-spacing: .02em; margin-top: 6px; }
+.fe-sub { font: 400 12px var(--f-mono); color: var(--m-muted); margin-top: 8px; }
+.fe-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--m-line); border: 1px solid var(--m-line); border-radius: var(--m-r); overflow: hidden; }
+.fe-stats div { background: var(--m-surface); padding: 10px 12px; }
+.fe-stats b { display: block; font: 600 18px var(--f-mono); }
+.fe-stats span { font: 400 10.5px var(--f-mono); color: var(--m-muted); letter-spacing: .08em; text-transform: uppercase; }
+.fe-track-h { display: flex; justify-content: space-between; font: 400 10.5px var(--f-mono); color: var(--m-muted); letter-spacing: .08em; text-transform: uppercase; }
+.fe-track { display: grid; grid-template-columns: repeat(30, 1fr); gap: 3px; margin-top: 6px; }
+.fe-track i { height: 30px; background: var(--m-cell); border-radius: 1px; display: block; }
+.fe-track i.f { background: var(--m-pri); }
+.fe-track i.h { background: linear-gradient(to top, var(--m-pri) 50%, var(--m-cell) 50%); }
+.fe-track i.x { background: repeating-linear-gradient(135deg, var(--m-bad) 0 3px, transparent 3px 6px); }
+.fe-track i.t { outline: 1px solid var(--m-acc); outline-offset: 1px; }
+.m-ferrite .job .n { font-family: var(--f-mono); font-size: 12px; font-weight: 600; }
+
+/* ============ STRATA ============ */
+.m-strata { --m-win-r: 8px; --m-r: 8px; --m-r-sm: 4px; --m-content-r: 8px; --m-stroke: 1.5; --m-cap: round;
+  --m-body: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+.m-strata[data-mode="light"] { --m-bg: linear-gradient(135deg, #E9EEF8 0%, #F3EEE8 55%, #EEF0F4 100%); --m-title: transparent; --m-side: transparent;
+  --m-content: rgba(255,255,255,.55); --m-content-edge: rgba(0,0,0,.06); --m-surface: #FFFFFF; --m-line: rgba(0,0,0,.07);
+  --m-text: #1A1A1A; --m-muted: #5F5F5F; --m-chip: rgba(255,255,255,.7); --m-nav-on: rgba(0,0,0,.05);
+  --m-acc: #3554A5; --m-pri: #3554A5; --m-on-pri: #FFFFFF; --m-ok: #0F7B0F; --m-warn: #9D5D00; --m-bad: #C42B1C; }
+.m-strata[data-mode="dark"] { --m-bg: linear-gradient(135deg, #1E2230 0%, #232020 55%, #1D2024 100%); --m-title: transparent; --m-side: transparent;
+  --m-content: rgba(58,58,58,.32); --m-content-edge: rgba(255,255,255,.06); --m-surface: #2B2B2B; --m-line: rgba(255,255,255,.08);
+  --m-text: #FFFFFF; --m-muted: #C5C5C5; --m-chip: rgba(255,255,255,.07); --m-nav-on: rgba(255,255,255,.07);
+  --m-acc: #9DB4F0; --m-pri: #9DB4F0; --m-on-pri: #10162A; --m-ok: #6CCB5F; --m-warn: #FCE100; --m-bad: #FF99A4; }
+.m-strata { background: var(--m-bg); }
+.m-strata .m-nav a.on::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 2px; background: var(--m-acc); }
+.st-title { font: 600 26px/1.2 "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; }
+.st-hero { display: grid; grid-template-columns: 1fr 230px; border-radius: 8px; background: var(--m-surface); border: 1px solid var(--m-line); overflow: hidden; }
+.st-hero .tx { padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; }
+.st-hero .ok-l { font: 600 18px/1.3 "Segoe UI Variable Display", "Segoe UI", sans-serif; display: flex; align-items: center; gap: 8px; }
+.st-hero .ok-l svg { width: 20px; height: 20px; color: var(--m-ok); }
+.st-hero .muted { color: var(--m-muted); }
+.st-hero .acts { display: flex; gap: 8px; margin-top: auto; }
+.st-hero svg.land { width: 100%; height: 100%; display: block; }
+.st-row { display: grid; grid-template-columns: 1.3fr 1fr; gap: 12px; }
+.st-card { background: var(--m-surface); border: 1px solid var(--m-line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+.st-card h4 { margin: 0 0 8px; font: 600 13px var(--m-body); }
+.st-bands { display: flex; flex-direction: column; gap: 3px; }
+.st-bands div { display: grid; grid-template-columns: 96px 1fr 60px; gap: 8px; align-items: center; font-size: 11.5px; color: var(--m-muted); }
+.st-bands b { display: block; height: 100%; min-height: 6px; border-radius: 3px; }
+.st-kv { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; font-size: 12.5px; }
+.st-kv span:nth-child(odd) { color: var(--m-muted); }
+
+/* ============ ARCHE ============ */
+.m-arche { --m-win-r: 8px; --m-r: 6px; --m-r-sm: 4px; --m-content-r: 0; --m-stroke: 1.3; --m-cap: round;
+  --m-body: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; --m-serif: "Newsreader", "Georgia", serif; }
+.m-arche[data-mode="light"] { --m-bg: #EFEEE8; --m-title: #EFEEE8; --m-side: #EFEEE8; --m-content: #FAFAF7; --m-content-edge: #D9D6CC;
+  --m-surface: #FAFAF7; --m-line: #DEDBD2; --m-text: #1B2420; --m-muted: #5F6862; --m-chip: #E4E2DA; --m-nav-on: #E4E2DA;
+  --m-acc: #8A6A2F; --m-brass: #9C7C3C; --m-pri: #1B2420; --m-on-pri: #FAFAF7; --m-ok: #3E7A55; --m-warn: #946200; --m-bad: #A8322D; }
+.m-arche[data-mode="dark"] { --m-bg: #121614; --m-title: #121614; --m-side: #121614; --m-content: #1A201D; --m-content-edge: #2E3632;
+  --m-surface: #1A201D; --m-line: #2E3632; --m-text: #ECEAE2; --m-muted: #9DA59F; --m-chip: #232A26; --m-nav-on: #232A26;
+  --m-acc: #D2B577; --m-brass: #C8A765; --m-pri: #ECEAE2; --m-on-pri: #121614; --m-ok: #86C29C; --m-warn: #E2B85A; --m-bad: #EE8A80; }
+.m-arche .m-app { font: 500 17px/1 var(--m-serif); letter-spacing: .01em; }
+.m-arche .m-nav a.on { background: none; color: var(--m-text); }
+.m-arche .m-nav a.on::after { content: ""; position: absolute; left: 38px; right: 12px; bottom: 3px; height: 1px; background: var(--m-brass); }
+.ar-eyebrow { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--m-acc); }
+.ar-head { display: grid; grid-template-columns: 1fr 150px; gap: 16px; align-items: center; }
+.ar-big { font: 400 38px/1.08 var(--m-serif); letter-spacing: -0.01em; margin-top: 6px; }
+.ar-big em { font-style: italic; color: var(--m-acc); }
+.ar-sub { color: var(--m-muted); margin-top: 8px; }
+.ar-acts { display: flex; gap: 8px; margin-top: 12px; }
+.ar-cal { display: flex; flex-wrap: wrap; gap: 8px; }
+.ar-cal i { width: 13px; height: 13px; border-radius: 50%; border: 1px solid var(--m-muted); display: block; }
+.ar-cal i.f { background: var(--m-text); border-color: var(--m-text); }
+.ar-cal i.h { background: var(--m-muted); border-color: var(--m-muted); opacity: .55; }
+.ar-cal i.x { border-color: var(--m-bad); background: transparent; box-shadow: inset 0 0 0 2px var(--m-bad); }
+.ar-ledger { border-top: 1px solid var(--m-text); }
+.ar-ledger .job { border-top: 1px solid var(--m-line); padding: 9px 2px; }
+.ar-ledger .job:first-child { border-top: 0; }
+.ar-cap { display: flex; justify-content: space-between; font-size: 11px; color: var(--m-muted); letter-spacing: .1em; text-transform: uppercase; }
+.m-arche .jobs { border: 0; background: none; border-radius: 0; }
+
+@media (max-width: 960px) {
+  .strip { grid-template-columns: 1fr; }
+  .sys { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .sys { grid-template-columns: 1fr; }
+  h1 { font-size: 28px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .mock { transition: background-color .25s ease, color .25s ease; }
+}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-dash" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-jobs" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+  <symbol id="i-run" viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z"/></symbol>
+  <symbol id="i-restore" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4.5h4.5"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
+  <symbol id="i-drive" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="8" rx="2"/><path d="M7 12h4"/><circle cx="17" cy="12" r="0.6"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.01M8 16.5h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.8"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/></symbol>
+</svg>
+
+<div class="wrap">
+  <header>
+    <h1>Trois identités pour RustBackup v2</h1>
+    <p class="lede">Lot J3.2. Trois directions volontairement opposées, chacune montrée sur le même tableau de bord avec les mêmes données d'exemple. Basculez chaque maquette entre clair et sombre. À la fin, il faut choisir une direction et un nom.</p>
+    <div class="meta"><span>Données d'exemple : 3 jobs, 411,6 Mio protégés</span><span>Contraintes GPUI : Mica, SVG couleur via <code>img()</code>, polices embarquées, animations</span><span>Référence : <code>docs/design/directions.md</code></span></div>
+  </header>
+
+  <section class="strip" aria-label="Vue d'ensemble">
+    <article class="card ov-card">
+      <div class="ov-head">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mk-ferrite"/></svg>
+        <div><div class="ov-name">A · Ferrite</div><div class="ov-tag">Tech industrielle, sombre d'abord</div></div>
+      </div>
+      <p>Le stockage magnétique comme matière : graphite, acier, oxyde de fer. Les sauvegardes deviennent une piste de bande magnétique, une cellule par jour.</p>
+      <div class="chips"><span class="chip">identité la plus forte</span><span class="chip">dense</span><span class="chip">peu natif</span></div>
+      <a href="#ferrite">Voir la direction A</a>
+    </article>
+    <article class="card ov-card">
+      <div class="ov-head">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mk-strata"/></svg>
+        <div><div class="ov-name">B · Strata</div><div class="ov-tag">Fluent natif, Mica, calme</div></div>
+      </div>
+      <p>Les instantanés empilés comme des couches géologiques. Fenêtre en Mica, Segoe UI Variable, icônes Fluent. La couleur vit dans le logo et les illustrations.</p>
+      <div class="chips"><span class="chip">le plus natif</span><span class="chip">risque le plus faible</span><span class="chip">moins distinctif</span></div>
+      <a href="#strata">Voir la direction B</a>
+    </article>
+    <article class="card ov-card">
+      <div class="ov-head">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mk-arche"/></svg>
+        <div><div class="ov-name">C · Arche</div><div class="ov-tag">Luxe discret, serif, encre et laiton</div></div>
+      </div>
+      <p>Tout mettre à l'abri. Calcaire froid, encre vert-noir, filets de laiton, titres en serif. Le tableau de bord se lit comme un registre.</p>
+      <div class="chips"><span class="chip">le plus singulier</span><span class="chip">éditorial</span><span class="chip">police à embarquer</span></div>
+      <a href="#arche">Voir la direction C</a>
+    </article>
+  </section>
+
+  <!-- ===================== A · FERRITE ===================== -->
+  <section class="dir" id="ferrite">
+    <div class="dir-head">
+      <div><h2>A · Ferrite</h2><div class="names">Noms possibles : <b>Ferrite</b> · Magnetite · Oxyde</div></div>
+      <div class="toggle" role="group" aria-label="Thème de la maquette Ferrite">
+        <button type="button" id="fe-dark" data-target="mock-fe" data-mode="dark" aria-pressed="true">Sombre</button>
+        <button type="button" id="fe-light" data-target="mock-fe" data-mode="light" aria-pressed="false">Clair</button>
+      </div>
+    </div>
+    <p class="thesis">Une sauvegarde est une écriture magnétique. L'interface ressemble à un instrument : chiffres en mono, titres condensés en capitales, une seule couleur chaude (l'oxyde), et une piste de 30 jours qui montre d'un coup d'œil les jours complets, incrémentaux ou en échec.</p>
+    <div class="stage">
+      <div class="mock m-ferrite" id="mock-fe" data-mode="dark" role="img" aria-label="Maquette du tableau de bord Ferrite">
+        <div class="m-title">
+          <svg class="lg" viewBox="0 0 64 64"><use href="#mk-ferrite"/></svg><span class="m-app">Ferrite</span>
+          <span class="m-sp"></span>
+          <span class="m-state"><i></i>Coffre déverrouillé</span>
+          <span class="m-wc"><span>—</span><span>▢</span><span>✕</span></span>
+        </div>
+        <div class="m-body">
+          <nav class="m-nav">
+            <a class="on"><svg class="ico"><use href="#i-dash"/></svg>Tableau de bord</a>
+            <a><svg class="ico"><use href="#i-jobs"/></svg>Sauvegardes</a>
+            <a><svg class="ico"><use href="#i-run"/></svg>Exécution</a>
+            <a><svg class="ico"><use href="#i-restore"/></svg>Restauration</a>
+            <a><svg class="ico"><use href="#i-history"/></svg>Historique</a>
+            <a><svg class="ico"><use href="#i-settings"/></svg>Paramètres</a>
+            <div class="foot" style="font-family:var(--f-mono);font-size:10px">AES-256 · ARGON2ID · ZSTD</div>
+          </nav>
+          <main class="m-main">
+            <div class="fe-hero">
+              <div>
+                <div class="fe-kicker">ÉTAT · 07 NOV 2026 · 22:14</div>
+                <div class="fe-big">Tout est protégé</div>
+                <div class="fe-sub">dernier run il y a 2 h · prochain ce soir 23:00 · vérifié hier, 0 bloc orphelin</div>
+              </div>
+              <div style="display:flex;gap:8px"><span class="btn sec">Restaurer</span><span class="btn pri">Sauvegarder maintenant</span></div>
+            </div>
+            <div class="fe-stats">
+              <div><b class="num">411,6 Mio</b><span>stocké</span></div>
+              <div><b class="num">3,2×</b><span>déduplication</span></div>
+              <div><b class="num">5</b><span>instantanés</span></div>
+              <div><b class="num">6 875</b><span>fichiers suivis</span></div>
+            </div>
+            <div>
+              <div class="fe-track-h"><span>Piste · 30 derniers jours</span><span>■ complet · ◧ incrémental · ▨ échec</span></div>
+              <div class="fe-track" aria-hidden="true">
+                <i></i><i></i><i class="f"></i><i class="h"></i><i class="h"></i><i></i><i class="h"></i><i class="h"></i><i class="h"></i><i class="x"></i>
+                <i class="h"></i><i class="h"></i><i></i><i></i><i class="f"></i><i class="h"></i><i class="h"></i><i class="h"></i><i class="h"></i><i></i>
+                <i class="h"></i><i class="h"></i><i class="f"></i><i class="h"></i><i class="h"></i><i class="h"></i><i></i><i class="h"></i><i class="h"></i><i class="h t"></i>
+              </div>
+            </div>
+            <div class="jobs">
+              <div class="job"><svg class="ico"><use href="#i-drive"/></svg><span class="n">documents → T7-USB</span><span class="s"><span class="dot ok"></span>OK · il y a 2 h</span><span class="s num">205,6 Mio · 412 Gio libres</span><span class="btn sec" style="padding:4px 8px;text-align:center">Lancer</span></div>
+              <div class="job"><svg class="ico"><use href="#i-server"/></svg><span class="n">photos → nas.local</span><span class="s"><span class="dot ok"></span>OK · hier 23:00</span><span class="s num">198,4 Mio · SFTP en ligne</span><span class="btn sec" style="padding:4px 8px;text-align:center">Lancer</span></div>
+              <div class="job"><svg class="ico"><use href="#i-drive"/></svg><span class="n">projets → T7-USB</span><span class="s"><span class="dot warn"></span>2 fichiers ignorés</span><span class="s num">7,6 Mio · disque connecté</span><span class="btn sec" style="padding:4px 8px;text-align:center">Lancer</span></div>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+    <div class="sys">
+      <div class="card"><h3>Logo</h3>
+        <div class="marks"><svg width="64" height="64" viewBox="0 0 64 64"><use href="#mk-ferrite"/></svg><svg width="32" height="32" viewBox="0 0 64 64"><use href="#mk-ferrite"/></svg><svg width="16" height="16" viewBox="0 0 64 64"><use href="#mk-ferrite"/></svg></div>
+        <p style="margin-top:10px">Un tore de ferrite avec son entrefer et trois spires. Lisible à 16 px : un anneau orange ouvert.</p></div>
+      <div class="card"><h3>Palette</h3>
+        <div class="swatches"><i class="sw" style="background:#0F1012"></i><i class="sw" style="background:#17191C"></i><i class="sw" style="background:#2A2D32"></i><i class="sw" style="background:#E8E4DD"></i><i class="sw" style="background:#E8703A"></i><i class="sw" style="background:#7F95A8"></i></div>
+        <div class="swl">sombre : graphite · forge · acier · cendre · oxyde · magnétite</div>
+        <div class="swatches" style="margin-top:8px"><i class="sw" style="background:#E9E8E4"></i><i class="sw" style="background:#F6F5F2"></i><i class="sw" style="background:#D9D7D1"></i><i class="sw" style="background:#17191C"></i><i class="sw" style="background:#B4441C"></i><i class="sw" style="background:#4A6175"></i></div>
+        <div class="swl">clair : béton · tôle · joint · encre · oxyde · magnétite</div></div>
+      <div class="card"><h3>Typographie et icônes</h3>
+        <p><span style="font:800 22px/1 'Big Shoulders Display',sans-serif;text-transform:uppercase;letter-spacing:.04em">Big Shoulders</span> pour les titres, <span style="font-family:var(--f-mono)">JetBrains Mono</span> pour les chiffres, Segoe UI Variable pour le texte.</p>
+        <div class="icons" style="color:#D2562A"><svg class="ico" style="--m-stroke:1.75;--m-cap:square"><use href="#i-drive"/></svg><svg class="ico" style="--m-stroke:1.75;--m-cap:square"><use href="#i-restore"/></svg><svg class="ico" style="--m-stroke:1.75;--m-cap:square"><use href="#i-lock"/></svg><svg class="ico" style="--m-stroke:1.75;--m-cap:square"><use href="#i-history"/></svg></div>
+        <p style="margin-top:6px;color:var(--muted)">Lucide, trait 1,75, extrémités carrées.</p></div>
+      <div class="card"><h3>Illustration</h3>
+        <svg class="vignette" viewBox="0 0 240 120" aria-label="Exemple de style : coffre isométrique">
+          <rect width="240" height="120" fill="#141518"/>
+          <path d="M120 22 L176 50 L120 78 L64 50 Z" fill="#2A2D32"/>
+          <path d="M64 50 L120 78 L120 106 L64 78 Z" fill="#1E2024"/>
+          <path d="M176 50 L120 78 L120 106 L176 78 Z" fill="#33373D"/>
+          <circle cx="148" cy="80" r="9" fill="none" stroke="#E0622D" stroke-width="3"/>
+          <path d="M64 50 L120 22 L176 50" fill="none" stroke="#E0622D" stroke-width="1.5"/>
+          <g fill="#7F95A8" opacity=".5"><rect x="22" y="94" width="20" height="3"/><rect x="198" y="30" width="20" height="3"/><rect x="198" y="36" width="12" height="3"/></g>
+        </svg>
+        <p style="margin-top:8px">Coupes isométriques en graphite, arêtes oxyde, grain léger. Coffres, disques, baies.</p></div>
+    </div>
+  </section>
+
+  <!-- ===================== B · STRATA ===================== -->
+  <section class="dir" id="strata">
+    <div class="dir-head">
+      <div><h2>B · Strata</h2><div class="names">Noms possibles : <b>Strata</b> · Sédiment · Couches</div></div>
+      <div class="toggle" role="group" aria-label="Thème de la maquette Strata">
+        <button type="button" id="st-light" data-target="mock-st" data-mode="light" aria-pressed="true">Clair</button>
+        <button type="button" id="st-dark" data-target="mock-st" data-mode="dark" aria-pressed="false">Sombre</button>
+      </div>
+    </div>
+    <p class="thesis">Chaque instantané dépose une couche. L'app se fond dans Windows 11 : Mica dans la barre de titre et la navigation, contenu sur une couche claire, rayons 4 et 8 px, Segoe UI Variable seul. L'identité tient dans le logo en coupe géologique et dans les illustrations.</p>
+    <div class="stage">
+      <div class="mock m-strata" id="mock-st" data-mode="light" role="img" aria-label="Maquette du tableau de bord Strata">
+        <div class="m-title">
+          <svg class="lg" viewBox="0 0 64 64"><use href="#mk-strata"/></svg><span class="m-app">Strata</span>
+          <span class="m-sp"></span>
+          <span class="m-state"><i></i>Déverrouillé</span>
+          <span class="m-wc"><span>—</span><span>▢</span><span>✕</span></span>
+        </div>
+        <div class="m-body">
+          <nav class="m-nav">
+            <a class="on"><svg class="ico"><use href="#i-dash"/></svg>Accueil</a>
+            <a><svg class="ico"><use href="#i-jobs"/></svg>Sauvegardes</a>
+            <a><svg class="ico"><use href="#i-run"/></svg>Exécution</a>
+            <a><svg class="ico"><use href="#i-restore"/></svg>Restaurer</a>
+            <a><svg class="ico"><use href="#i-history"/></svg>Historique</a>
+            <a><svg class="ico"><use href="#i-settings"/></svg>Paramètres</a>
+            <div class="foot">Chiffré AES-256 · Argon2id</div>
+          </nav>
+          <main class="m-main">
+            <div class="st-title">Accueil</div>
+            <div class="st-hero">
+              <div class="tx">
+                <div class="ok-l"><svg class="ico"><use href="#i-check"/></svg>Vos fichiers sont protégés</div>
+                <div class="muted">Dernière sauvegarde il y a 2 h. Prochaine ce soir à 23:00. Dernière vérification hier : intègre.</div>
+                <div class="acts"><span class="btn pri">Sauvegarder maintenant</span><span class="btn sec">Restaurer des fichiers</span></div>
+              </div>
+              <svg class="land" viewBox="0 0 230 140" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+                <rect width="230" height="140" fill="#BFD3F2"/>
+                <path d="M0 48 C60 34 120 62 230 42 V140 H0 Z" fill="#E6C38F"/>
+                <path d="M0 74 C70 60 140 88 230 68 V140 H0 Z" fill="#C47E55"/>
+                <path d="M0 98 C70 88 150 110 230 94 V140 H0 Z" fill="#4F6B95"/>
+                <path d="M0 120 C80 112 150 128 230 116 V140 H0 Z" fill="#22304F"/>
+                <g fill="#FFFFFF" opacity=".85"><rect x="60" y="62" width="10" height="13" rx="2"/><rect x="150" y="84" width="10" height="13" rx="2"/><rect x="104" y="108" width="10" height="13" rx="2"/></g>
+              </svg>
+            </div>
+            <div class="st-row">
+              <div class="st-card"><h4>Strates : données nouvelles par instantané</h4>
+                <div class="st-bands">
+                  <div><span>7 nov 22:14</span><b style="height:6px;width:12%;background:#22304F"></b><span class="num">+1,2 Mio</span></div>
+                  <div><span>6 nov 23:00</span><b style="height:8px;width:22%;background:#4F6B95"></b><span class="num">+4,8 Mio</span></div>
+                  <div><span>5 nov 23:00</span><b style="height:7px;width:16%;background:#C47E55"></b><span class="num">+2,9 Mio</span></div>
+                  <div><span>4 nov 23:00</span><b style="height:9px;width:30%;background:#E6C38F"></b><span class="num">+7,4 Mio</span></div>
+                  <div><span>1 nov · complet</span><b style="height:16px;width:100%;background:#BFD3F2"></b><span class="num">205,6 Mio</span></div>
+                </div></div>
+              <div class="st-card"><h4>Destinations</h4>
+                <div class="st-kv">
+                  <span><span class="dot ok"></span>Samsung T7 (E:)</span><span class="num">412 Gio libres</span>
+                  <span><span class="dot ok"></span>nas.local · SFTP</span><span>en ligne</span>
+                  <span><span class="dot warn"></span>Projets</span><span>2 fichiers ignorés</span>
+                  <span>Déduplication</span><span class="num">3,2×</span>
+                </div></div>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+    <div class="sys">
+      <div class="card"><h3>Logo</h3>
+        <div class="marks"><svg width="64" height="64" viewBox="0 0 64 64"><use href="#mk-strata"/></svg><svg width="32" height="32" viewBox="0 0 64 64"><use href="#mk-strata"/></svg><svg width="16" height="16" viewBox="0 0 64 64"><use href="#mk-strata"/></svg></div>
+        <p style="margin-top:10px">Une carotte de cinq couches ondulées, la plus récente en haut. Pleine couleur, sans contour.</p></div>
+      <div class="card"><h3>Palette</h3>
+        <div class="swatches"><i class="sw" style="background:#F3F3F3"></i><i class="sw" style="background:#FFFFFF"></i><i class="sw" style="background:#1A1A1A"></i><i class="sw" style="background:#3554A5"></i><i class="sw" style="background:#E6C38F"></i><i class="sw" style="background:#C47E55"></i></div>
+        <div class="swl">clair : repli Mica · carte · texte · lapis · sable · argile</div>
+        <div class="swatches" style="margin-top:8px"><i class="sw" style="background:#202020"></i><i class="sw" style="background:#2B2B2B"></i><i class="sw" style="background:#FFFFFF"></i><i class="sw" style="background:#9DB4F0"></i><i class="sw" style="background:#4F6B95"></i><i class="sw" style="background:#22304F"></i></div>
+        <div class="swl">sombre : repli Mica · carte · texte · lapis · ardoise · profond</div></div>
+      <div class="card"><h3>Typographie et icônes</h3>
+        <p><span style="font:600 22px/1 'Segoe UI Variable Display','Segoe UI',sans-serif">Segoe UI Variable</span> seule, rampe Windows 11 (12 · 14 · 20 · 28). Rien à embarquer.</p>
+        <div class="icons" style="color:#3554A5"><svg class="ico" style="--m-stroke:1.5"><use href="#i-drive"/></svg><svg class="ico" style="--m-stroke:1.5"><use href="#i-restore"/></svg><svg class="ico" style="--m-stroke:1.5"><use href="#i-lock"/></svg><svg class="ico" style="--m-stroke:1.5"><use href="#i-history"/></svg></div>
+        <p style="margin-top:6px;color:var(--muted)">Fluent System Icons : regular au repos, filled pour l'élément actif.</p></div>
+      <div class="card"><h3>Illustration</h3>
+        <svg class="vignette" viewBox="0 0 240 120" aria-label="Exemple de style : paysage en couches">
+          <rect width="240" height="120" fill="#DCE7F7"/>
+          <circle cx="190" cy="30" r="14" fill="#F4E3C3"/>
+          <path d="M0 58 C60 44 130 70 240 50 V120 H0 Z" fill="#E6C38F"/>
+          <path d="M0 78 C70 66 150 92 240 72 V120 H0 Z" fill="#C47E55"/>
+          <path d="M0 96 C80 88 160 108 240 92 V120 H0 Z" fill="#4F6B95"/>
+          <g fill="#FFFFFF"><rect x="48" y="70" width="12" height="15" rx="2.5"/><rect x="170" y="88" width="12" height="15" rx="2.5"/></g>
+        </svg>
+        <p style="margin-top:8px">Coupes de terrain douces, rendu « argile » 3D léger, fichiers pris dans les couches comme des fossiles.</p></div>
+    </div>
+  </section>
+
+  <!-- ===================== C · ARCHE ===================== -->
+  <section class="dir" id="arche">
+    <div class="dir-head">
+      <div><h2>C · Arche</h2><div class="names">Noms possibles : <b>Arche</b> · Abri · Havre</div></div>
+      <div class="toggle" role="group" aria-label="Thème de la maquette Arche">
+        <button type="button" id="ar-light" data-target="mock-ar" data-mode="light" aria-pressed="true">Clair</button>
+        <button type="button" id="ar-dark" data-target="mock-ar" data-mode="dark" aria-pressed="false">Sombre</button>
+      </div>
+    </div>
+    <p class="thesis">Mettre à l'abri ce qui compte. Une phrase en serif ouvre le tableau de bord, comme la première ligne d'un registre. Encre vert-noir sur calcaire, boutons noirs, détails en laiton. Peu d'éléments, beaucoup d'air, des filets fins.</p>
+    <div class="stage">
+      <div class="mock m-arche" id="mock-ar" data-mode="light" role="img" aria-label="Maquette du tableau de bord Arche">
+        <div class="m-title">
+          <svg class="lg" viewBox="0 0 64 64"><use href="#mk-arche-ink"/></svg><span class="m-app">Arche</span>
+          <span class="m-sp"></span>
+          <span class="m-state"><i></i>Ouvert</span>
+          <span class="m-wc"><span>—</span><span>▢</span><span>✕</span></span>
+        </div>
+        <div class="m-body">
+          <nav class="m-nav">
+            <a class="on"><svg class="ico"><use href="#i-dash"/></svg>Aujourd'hui</a>
+            <a><svg class="ico"><use href="#i-jobs"/></svg>Sauvegardes</a>
+            <a><svg class="ico"><use href="#i-run"/></svg>En cours</a>
+            <a><svg class="ico"><use href="#i-restore"/></svg>Retrouver</a>
+            <a><svg class="ico"><use href="#i-history"/></svg>Registre</a>
+            <a><svg class="ico"><use href="#i-settings"/></svg>Réglages</a>
+            <div class="foot">Chiffré de bout en bout</div>
+          </nav>
+          <main class="m-main">
+            <div class="ar-head">
+              <div>
+                <div class="ar-eyebrow">Samedi 7 novembre</div>
+                <div class="ar-big">Tout est à l'abri<br>depuis <em>22 h 14</em>.</div>
+                <div class="ar-sub">Trois sauvegardes, 411,6 Mio conservés en 5 instantanés. Vérifié hier, sans défaut.</div>
+                <div class="ar-acts"><span class="btn pri">Sauvegarder maintenant</span><span class="btn sec">Retrouver un fichier</span></div>
+              </div>
+              <svg viewBox="0 0 150 150" aria-hidden="true" style="width:150px;height:150px">
+                <g fill="none" stroke="var(--m-text)" stroke-width="1.2" stroke-linecap="round">
+                  <path d="M35 128 V68 A40 40 0 0 1 115 68 V128"/>
+                  <path d="M43 128 V70 A32 32 0 0 1 107 70 V128" opacity=".45"/>
+                  <path d="M18 128 H132"/>
+                  <path d="M24 134 H126" opacity=".35"/>
+                </g>
+                <path d="M54 104 H96 L88 116 H62 Z" fill="none" stroke="var(--m-brass)" stroke-width="1.4" stroke-linejoin="round"/>
+                <path d="M75 104 V84 M75 86 L88 100" fill="none" stroke="var(--m-brass)" stroke-width="1.2" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <div>
+              <div class="ar-cap"><span>Trente derniers jours</span><span>● complet · ◐ incrémental · ○ manqué</span></div>
+              <div class="ar-cal" style="margin-top:8px" aria-hidden="true">
+                <i></i><i></i><i class="f"></i><i class="h"></i><i class="h"></i><i></i><i class="h"></i><i class="h"></i><i class="h"></i><i class="x"></i><i class="h"></i><i class="h"></i><i></i><i></i><i class="f"></i>
+                <i class="h"></i><i class="h"></i><i class="h"></i><i class="h"></i><i></i><i class="h"></i><i class="h"></i><i class="f"></i><i class="h"></i><i class="h"></i><i class="h"></i><i></i><i class="h"></i><i class="h"></i><i class="h"></i>
+              </div>
+            </div>
+            <div class="ar-ledger jobs">
+              <div class="job"><svg class="ico"><use href="#i-drive"/></svg><span class="n">Documents</span><span class="s">vers Samsung T7</span><span class="s"><span class="dot ok"></span>il y a 2 h</span><span class="s num" style="text-align:right">205,6 Mio</span></div>
+              <div class="job"><svg class="ico"><use href="#i-server"/></svg><span class="n">Photos</span><span class="s">vers nas.local</span><span class="s"><span class="dot ok"></span>hier, 23 h</span><span class="s num" style="text-align:right">198,4 Mio</span></div>
+              <div class="job"><svg class="ico"><use href="#i-drive"/></svg><span class="n">Projets</span><span class="s">vers Samsung T7</span><span class="s"><span class="dot warn"></span>2 fichiers écartés</span><span class="s num" style="text-align:right">7,6 Mio</span></div>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+    <div class="sys">
+      <div class="card"><h3>Logo</h3>
+        <div class="marks" style="color:var(--fg)"><svg width="64" height="64" viewBox="0 0 64 64"><use href="#mk-arche"/></svg><svg width="32" height="32" viewBox="0 0 64 64"><use href="#mk-arche"/></svg><svg width="16" height="16" viewBox="0 0 64 64"><use href="#mk-arche"/></svg></div>
+        <p style="margin-top:10px">Une arche en plein cintre qui abrite une coque en laiton. Trait unique, s'épaissit pour l'icône.</p></div>
+      <div class="card"><h3>Palette</h3>
+        <div class="swatches"><i class="sw" style="background:#EFEEE8"></i><i class="sw" style="background:#FAFAF7"></i><i class="sw" style="background:#DEDBD2"></i><i class="sw" style="background:#1B2420"></i><i class="sw" style="background:#8A6A2F"></i><i class="sw" style="background:#3E7A55"></i></div>
+        <div class="swl">clair : calcaire · papier · filet · encre · laiton · succès</div>
+        <div class="swatches" style="margin-top:8px"><i class="sw" style="background:#121614"></i><i class="sw" style="background:#1A201D"></i><i class="sw" style="background:#2E3632"></i><i class="sw" style="background:#ECEAE2"></i><i class="sw" style="background:#D2B577"></i><i class="sw" style="background:#86C29C"></i></div>
+        <div class="swl">sombre : nuit · surface · filet · craie · laiton · succès</div></div>
+      <div class="card"><h3>Typographie et icônes</h3>
+        <p><span style="font:400 24px/1 'Newsreader',Georgia,serif">Newsreader</span> pour les titres (à embarquer, OFL), Segoe UI Variable pour l'interface.</p>
+        <div class="icons" style="color:var(--fg)"><svg class="ico" style="--m-stroke:1.3"><use href="#i-drive"/></svg><svg class="ico" style="--m-stroke:1.3"><use href="#i-restore"/></svg><svg class="ico" style="--m-stroke:1.3"><use href="#i-lock"/></svg><svg class="ico" style="--m-stroke:1.3"><use href="#i-history"/></svg></div>
+        <p style="margin-top:6px;color:var(--muted)">Lucide, trait fin 1,25, extrémités rondes.</p></div>
+      <div class="card"><h3>Illustration</h3>
+        <svg class="vignette" viewBox="0 0 240 120" aria-label="Exemple de style : gravure au trait">
+          <rect width="240" height="120" fill="#F4F3EE"/>
+          <g fill="none" stroke="#1B2420" stroke-width="1" stroke-linecap="round">
+            <path d="M80 104 V58 A40 40 0 0 1 160 58 V104"/>
+            <path d="M40 104 H200"/>
+            <path d="M88 104 V60 M96 104 V58 M104 104 V57" opacity=".35"/>
+            <path d="M184 40 l4 4 M188 40 l-4 4" opacity=".5"/>
+          </g>
+          <path d="M100 92 H140 L133 102 H107 Z" fill="#C8A765" opacity=".85"/>
+        </svg>
+        <p style="margin-top:8px">Gravure au trait, une encre et un lavis laiton. Objets simples : arche, coque, clé, livres.</p></div>
+    </div>
+  </section>
+
+  <!-- ===================== DECISION ===================== -->
+  <section class="dir" id="decision">
+    <h2>Comparaison</h2>
+    <div class="matrix-wrap">
+      <table>
+        <thead><tr><th>Critère</th><th>A · Ferrite</th><th>B · Strata</th><th>C · Arche</th></tr></thead>
+        <tbody>
+          <tr><td>Force de l'identité</td><td class="score">●●●●● très forte</td><td class="score">●●○○○ discrète</td><td class="score">●●●●○ forte</td></tr>
+          <tr><td>Intégration Windows 11</td><td>Opaque, Mica seulement en option dans la barre de titre</td><td>Totale : Mica, rampe et rayons Fluent</td><td>Bonne : surfaces opaques, rayons Fluent</td></tr>
+          <tr><td>Lisibilité de l'état</td><td>Excellente : piste de 30 jours, chiffres en mono</td><td>Très bonne : carte héros, couches</td><td>Très bonne : phrase de statut, calendrier</td></tr>
+          <tr><td>Coût GPUI</td><td>1 police d'affichage + 1 mono à embarquer</td><td>Aucune police ; Mica et repli à gérer</td><td>1 serif à embarquer</td></tr>
+          <tr><td>Illustrations (generator-assets)</td><td>Isométrie graphite : facile à garder cohérente</td><td>Rendu argile doux : facile</td><td>Gravure au trait : la plus dure à générer proprement</td></tr>
+          <tr><td>Risque principal</td><td>Fatigant en clair ; cliché « dark tech » si l'oxyde devient un simple accent fluo</td><td>Se confond avec Paramètres de Windows</td><td>Paraît « magazine » ; serif à petite taille à éviter</td></tr>
+          <tr><td>Nom</td><td>Terme technique courant, marque à vérifier</td><td>Nom très utilisé dans la tech, marque à vérifier</td><td>Mot français rare en logiciel, à vérifier aussi</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="rec"><b>Mon avis :</b> Ferrite si l'objectif est une identité qu'on reconnaît au premier coup d'œil, Strata si l'app doit d'abord paraître native. Une combinaison est possible : la structure Fluent et le Mica de Strata dans la navigation, la piste de 30 jours et la palette oxyde de Ferrite dans le contenu. Aucun nom n'a encore été vérifié côté marques déposées.</p>
+  </section>
+</div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="fe-ox" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F49A66"/><stop offset=".55" stop-color="#E0622D"/><stop offset="1" stop-color="#8E3417"/></linearGradient>
+    <clipPath id="st-clip"><rect x="6" y="6" width="52" height="52" rx="13"/></clipPath>
+  </defs>
+  <symbol id="mk-ferrite" viewBox="0 0 64 64">
+    <rect width="64" height="64" rx="14" fill="#141518"/>
+    <circle cx="32" cy="32" r="17" fill="none" stroke="url(#fe-ox)" stroke-width="9" stroke-dasharray="96.8 10" transform="rotate(-28 32 32)"/>
+    <g stroke="#C9CED6" stroke-width="2.6" stroke-linecap="square"><line x1="23.3" y1="37" x2="11.2" y2="44"/><line x1="22.3" y1="34.6" x2="8.8" y2="38.2"/><line x1="22" y1="32" x2="8" y2="32"/></g>
+  </symbol>
+  <symbol id="mk-strata" viewBox="0 0 64 64">
+    <g clip-path="url(#st-clip)">
+      <rect width="64" height="64" fill="#BFD3F2"/>
+      <path d="M0 21 C16 15 34 27 64 19 V64 H0 Z" fill="#E6C38F"/>
+      <path d="M0 32 C18 26 36 38 64 30 V64 H0 Z" fill="#C47E55"/>
+      <path d="M0 42 C20 37 38 47 64 40 V64 H0 Z" fill="#4F6B95"/>
+      <path d="M0 51 C20 47 40 56 64 50 V64 H0 Z" fill="#22304F"/>
+    </g>
+  </symbol>
+  <symbol id="mk-arche" viewBox="0 0 64 64">
+    <g fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 52 V30 A15 15 0 0 1 47 30 V52"/><path d="M9 52 H55"/></g>
+    <path d="M23 41 H41 L37.5 46 H26.5 Z" fill="#B08D48"/>
+  </symbol>
+  <symbol id="mk-arche-ink" viewBox="0 0 64 64">
+    <g fill="none" stroke="var(--m-text)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 52 V30 A15 15 0 0 1 47 30 V52"/><path d="M9 52 H55"/></g>
+    <path d="M23 41 H41 L37.5 46 H26.5 Z" fill="var(--m-brass)"/>
+  </symbol>
+</svg>
+
+<script>
+document.querySelectorAll('.toggle button').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var mock = document.getElementById(b.dataset.target);
+    if (!mock) return;
+    mock.setAttribute('data-mode', b.dataset.mode);
+    b.parentElement.querySelectorAll('button').forEach(function (o) { o.setAttribute('aria-pressed', String(o === b)); });
+  });
+});
+</script>

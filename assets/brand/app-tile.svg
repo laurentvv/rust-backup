@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- RustBackup application tile: ink square, chalk arch, brass hull (readable on light and dark taskbars) -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#1B2420"/>
+  <g fill="none" stroke="#ECEAE2" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19 47 V30 A13 13 0 0 1 45 30 V47"/>
+    <path d="M12 47 H52"/>
+  </g>
+  <path d="M24.5 37 H39.5 L36.5 42.5 H27.5 Z" fill="#D2B577" stroke="#D2B577" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>

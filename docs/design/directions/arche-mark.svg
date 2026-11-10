@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Arche: a round arch (shelter, archive) holding a keel line (the ark) on a ground line -->
+  <g fill="none" stroke="#1B2420" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M17 52 V30 A15 15 0 0 1 47 30 V52"/>
+    <path d="M9 52 H55"/>
+  </g>
+  <path d="M23 41 H41 L37.5 46 H26.5 Z" fill="#9C7C3C"/>
+</svg>

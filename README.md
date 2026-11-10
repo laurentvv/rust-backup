@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/brand-mark.svg" width="128" height="128" alt="RustBackup Logo" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/mark-dark.svg" />
+    <img src="assets/brand/mark-light.svg" width="112" height="112" alt="RustBackup mark: an arch sheltering a brass hull" />
+  </picture>
 </p>
 
 <h1 align="center">RustBackup</h1>
@@ -10,7 +13,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024_Edition-orange?logo=rust" alt="Rust Edition 2024" />
-  <img src="https://img.shields.io/badge/GUI-GPUI_Kit_0.9.0-0B8F80?logo=rust" alt="GPUI Kit 0.9.0" />
+  <img src="https://img.shields.io/badge/GUI-GPUI_Kit_0.9.0-82642B?logo=rust" alt="GPUI Kit 0.9.0" />
   <img src="https://img.shields.io/badge/Crypto-AES--256--GCM_%2B_Argon2id-14E0C8" alt="Crypto" />
   <img src="https://img.shields.io/badge/Chunking-FastCDC_v2020-blue" alt="FastCDC" />
   <img src="https://img.shields.io/badge/Catalog-DuckDB-FFF000?logo=duckdb" alt="DuckDB" />
@@ -40,15 +43,15 @@ Whether backing up directly to external USB drives, local NVMe volumes, or offsi
   Content-defined chunking with **FastCDC v2020** (256 KiB / 1 MiB / 4 MiB) combined with **BLAKE3** content addressing. A second run against an unchanged directory stores **zero new bytes** in fractions of a second. Automatically schedules a Full backup after $X$ incremental backups (default: 10, configurable per job or set to 0 to disable), or force a Full backup on demand at any time (`--full` or GUI toggle).
 - **Encrypt-Then-Store AEAD Cryptography**  
   Each chunk is compressed with **zstd**, then sealed using **AES-256-GCM** with a fresh 96-bit random nonce. Associated data strictly binds `BLAKE3(plaintext) || plain_len` to prevent chunk-swapping or truncation attacks. The 256-bit master key is encrypted via **Argon2id** (64 MiB, $t=3$, $p=4$) and zeroized in memory on drop.
-- **Self-Contained Repository Format (v1)**  
-  Contains `config.json`, `keys/`, `chunks/`, and `snapshots/`. Restoring or verifying data requires **only the repository and passphrase** — zero dependence on the local database.
+- **Self-Contained Repository Format (v2, pack files)**  
+  Contains `config.json`, `keys/`, `packs/` (~16 MiB pack files), `index/` and `snapshots/`; v1 repositories (one file per chunk) stay readable. Restoring or verifying data requires **only the repository and passphrase** — zero dependence on the local database.
 - **Dual Storage Backends**  
   - **Local Filesystems**: USB drives, external SSDs, internal mount points.
   - **Remote SFTP**: Linux servers via `russh` & `russh-sftp` using SSH public-key authentication (OpenSSH / PEM, passphrase-protected keys, and TOFU host-key pinning).
 - **Atomic Operations by Design**  
   All chunks and manifests land via temporary files and atomic rename. Interrupted or killed runs never produce a corrupted snapshot. Source files are opened read-only and **never modified or deleted**.
-- **Partial & Granular Restores**  
-  Restore single files or entire directory subtrees to their original paths or a custom destination, with hierarchical tree browsing, skip/overwrite policies, and exact modification time (`mtime`) restoration.
+- **Partial & Granular Restores, Fast over SFTP**  
+  Restore single files or entire directory subtrees to their original paths or a custom destination, with hierarchical tree browsing, skip/overwrite policies, and exact modification time (`mtime`) restoration. The restore is plan-driven: each pack is read once with exact, coalesced byte-range reads, every chunk is authenticated and BLAKE3-checked, and files are written in parallel with live progress (files/s, MiB/s, time left).
 - **Dual-Depth Integrity Verification**  
   - **Quick**: Validates manifest cryptographic authentication and referenced chunk presence.
   - **Full**: Reads, decrypts, and re-computes BLAKE3 hashes for every chunk to detect silent bit rot.
@@ -58,26 +61,30 @@ Whether backing up directly to external USB drives, local NVMe volumes, or offsi
   Prevents conflicting concurrent backups or maintenance runs across processes or threads via atomic JSON locks (`locks/<id>.json`) with automatic release on drop and stale-lock recovery.
 - **Local DuckDB Tracking Catalog**  
   High-performance local embedded database tracking jobs, execution statistics, snapshot metadata, and verification history.
-- **Hardware-Accelerated Native GUI**  
-  Built with **GPUI Kit 0.9.0**, rendering at 120 FPS with minimal memory overhead, bilingual French (default) / English interface, keyboard shortcuts (`Ctrl+1..4`, `Ctrl+B`, `Ctrl+,`), and steel-blue / dark theme support.
+- **Native GPU-Rendered GUI, "Arche" Design**  
+  Built with **GPUI Kit 0.9.0**: bilingual French (default) / English interface, keyboard shortcuts (`Ctrl+1..4`, `Ctrl+B`, `Ctrl+,`), and the Arche visual identity — limestone, ink and brass palettes in light and dark themes (WCAG 2.2 AA contrast checked by unit tests), the Newsreader display serif and an arch mark. See [`docs/design/DESIGN_SYSTEM.md`](docs/design/DESIGN_SYSTEM.md).
 
 ---
 
 ## 🖼️ Application Preview
 
 <p align="center">
-  <img src="assets/screenshots/rustbackup-walkthrough.gif" alt="RustBackup Native GPUI Walkthrough" width="90%" />
+  <img src="assets/screenshots/rustbackup-walkthrough.gif" alt="RustBackup walkthrough: dashboard, backups, restore, history, settings, dark theme" width="90%" />
 </p>
 
-### 📸 Native GPUI Interface Views
+### 📸 Interface Views (Arche design, English UI, demo data)
 
-| **Dashboard (Protected Volumes & Stats)** | **Backup Jobs & Destination Config** |
+| **Dashboard** | **Backup Jobs (local USB and SFTP)** |
 | :---: | :---: |
-| ![Dashboard](assets/screenshots/01-dashboard.png) | ![Jobs](assets/screenshots/02-jobs.png) |
-| **Granular Restore & Prune Maintenance** | **Execution & Verification History** |
+| ![Dashboard](assets/screenshots/01-dashboard.png) | ![Backup jobs](assets/screenshots/02-jobs.png) |
+| **Restore: snapshot list and file tree** | **Backup & Verification History** |
 | ![Restore](assets/screenshots/04-restore.png) | ![History](assets/screenshots/05-history.png) |
-| **Settings & Bilingual Switch (FR/EN)** | **Dark Mode & Hardware Acceleration** |
-| ![Settings](assets/screenshots/06-settings.png) | ![Dark Mode](assets/screenshots/08-dashboard-dark.png) |
+| **Settings: language, theme, passphrase** | **Dark Theme** |
+| ![Settings](assets/screenshots/06-settings.png) | ![Dark theme dashboard](assets/screenshots/08-dashboard-dark.png) |
+| **Restore in the Dark Theme** | |
+| ![Dark theme restore](assets/screenshots/07-restore-dark.png) | |
+
+*Screenshots use a throwaway demo catalog (`RBACKUP_DB` points the GUI at any catalog file, like the CLI's `--db`).*
 
 ---
 
@@ -131,6 +138,24 @@ forces it — see `docs/REPO_FORMAT.md`). `RBACKUP_UPLOAD_WORKERS` is clamped to
 `RBACKUP_SFTP_WRITERS=channel` puts the writers back on one shared connection (then
 OpenSSH's `MaxSessions`, default 10, caps them). `RBACKUP_PROFILE=1` prints per-stage
 timings at the end of a run.
+
+### ♻️ SFTP Restore Throughput (same LAN server)
+
+*Full restore of each corpus from the pack repository; every restored tree compared byte for byte
+with the source (`diff -r`):*
+
+| Corpus | Per-chunk range reads (before) | Plan-driven restore (now) |
+| :-- | :--- | :--- |
+| 4 000 files, 4-128 KiB (256 MiB) | 105.4 s | **15.0 s** |
+| 800 files, 8-32 KiB (16 MiB) | 22.0 s | **2.6 s** |
+| Mixed: 4 × 256 MiB + 800 small files (1.04 GiB) | 254.2 s | **56.5 s** |
+
+Before, every chunk cost an SFTP open + seek + read + close, one after another, and the SFTP
+client's read-ahead pulled about twice the requested bytes. Now the restore plans all
+needed chunks per pack, reads each pack once through exact pipelined requests (no read-ahead past
+the range) on dedicated reader connections (`RBACKUP_SFTP_READERS`, default 4), and writes each
+chunk at its offset in every file that needs it (`RBACKUP_RESTORE_WORKERS`, default 4). Restored
+files still land via temp name + atomic rename.
 
 ---
 

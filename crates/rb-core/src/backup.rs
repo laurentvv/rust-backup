@@ -3,7 +3,9 @@
 //!
 //! Storage runs as a pipeline: the walk thread only reads, chunks and
 //! hashes; worker threads compress/seal in parallel; upload writers with
-//! dedicated backend channels land the chunks. Dedup membership comes from
+//! dedicated backend channels land the chunks, grouped into pack files
+//! (see [`crate::pack`]); one index file is written once every pack is
+//! durable, and the manifest after it. Dedup membership comes from
 //! an in-memory index built once per run, so the hot path never pays a
 //! network round trip to ask "does this chunk already exist?".
 //!
@@ -27,6 +29,7 @@ use crate::hash::ChunkHash;
 use crate::manifest::{
     ChunkRef, EntryKind, FileEntry, SkippedItem, SnapshotManifest, SourceSnapshot,
 };
+use crate::pack::{IndexPack, PackBuilder, pack_target_bytes};
 use crate::repo::Repository;
 
 /// Live progress events emitted during a backup run.
@@ -303,7 +306,13 @@ pub fn run_backup(
     let times = Arc::clone(&pipeline.times);
     let walk_ns = run_started.elapsed().as_nanos();
     let drain_started = Instant::now();
-    pipeline.finish()?;
+    let packs = pipeline.finish()?;
+    // The index lands AFTER every pack is durable and BEFORE the manifest:
+    // no durable index ever points at a missing pack, and no snapshot
+    // refers to a chunk the index cannot find.
+    if !packs.is_empty() {
+        repo.write_index(&packs)?;
+    }
     let drain_ns = drain_started.elapsed().as_nanos();
 
     // Finalize LAST: until this atomic write lands, the snapshot does not
@@ -465,9 +474,10 @@ struct RawChunk {
     data: Vec<u8>,
 }
 
-/// One sealed chunk blob ready for upload.
+/// One sealed chunk blob ready to be packed.
 struct SealedChunk {
-    rel: String,
+    hash: ChunkHash,
+    plain_len: u64,
     blob: Vec<u8>,
 }
 
@@ -475,7 +485,10 @@ struct SealedChunk {
 ///
 /// Topology: walk thread → [`RAW_QUEUE`] → N compress/seal workers →
 /// [`SEALED_QUEUE`] → [`UPLOAD_WORKERS`] upload writers (each with a
-/// dedicated backend channel). All queues are bounded: a slow destination
+/// dedicated backend channel). The writers append sealed blobs to ONE
+/// shared pack builder and write a whole pack whenever it reaches the size
+/// target (and the last partial pack once the queue drained), so the pack
+/// count follows the data volume, not the writer count. All queues are bounded: a slow destination
 /// applies backpressure to the walk instead of ballooning RAM.
 ///
 /// Failure semantics: the first worker error is remembered and the worker
@@ -493,6 +506,8 @@ struct ChunkPipeline {
     workers: Vec<std::thread::JoinHandle<()>>,
     /// Stage timings (reported with `RBACKUP_PROFILE`).
     times: Arc<StageTimes>,
+    /// Index entries of every pack written by the writers.
+    packs: Arc<Mutex<Vec<IndexPack>>>,
 }
 
 impl ChunkPipeline {
@@ -510,6 +525,9 @@ impl ChunkPipeline {
         let (raw_tx, raw_rx) = flume::bounded(RAW_QUEUE);
         let (sealed_tx, sealed_rx) = flume::bounded(SEALED_QUEUE);
         let mut workers = Vec::new();
+        let builder = Arc::new(Mutex::new(PackBuilder::new()));
+        let packs: Arc<Mutex<Vec<IndexPack>>> = Arc::new(Mutex::new(Vec::new()));
+        let target = pack_target_bytes();
 
         // Upload writers first: a backend that cannot open them fails the
         // run before anything is read.
@@ -528,19 +546,54 @@ impl ChunkPipeline {
             let rx: flume::Receiver<SealedChunk> = sealed_rx.clone();
             let errors = Arc::clone(&first_error);
             let times = Arc::clone(&times);
+            let builder = Arc::clone(&builder);
+            let packs = Arc::clone(&packs);
+            let repo = repo.clone();
             workers.push(std::thread::spawn(move || {
-                while let Ok(chunk) = rx.recv() {
+                // Seals a full pack and writes it through this writer.
+                let flush = |writer: &mut Box<dyn crate::backend::ChunkWriter>,
+                             full: PackBuilder|
+                 -> crate::Result<()> {
+                    let sealed = repo.seal_pack(full)?;
+                    // v1 repositories switch to config version 2 before
+                    // their first pack lands.
+                    repo.ensure_pack_format()?;
                     let started = Instant::now();
-                    let written = writer.write_new(&chunk.rel, &chunk.blob);
+                    let written = writer.write_new(&sealed.rel, &sealed.data);
                     times.add(&times.write_ns, started);
-                    if let Err(e) = written {
+                    written?;
+                    lock(&packs).push(sealed.entry);
+                    Ok(())
+                };
+                while let Ok(chunk) = rx.recv() {
+                    let full = {
+                        let mut b = lock(&builder);
+                        b.add(&chunk.hash, &chunk.blob, chunk.plain_len);
+                        (b.len() >= target).then(|| std::mem::replace(&mut *b, PackBuilder::new()))
+                    };
+                    if let Some(full) = full
+                        && let Err(e) = flush(&mut writer, full)
+                    {
                         record_error(&errors, e);
                         return;
                     }
                 }
-                // Queue drained: make every chunk of this writer durable
-                // under its final name (batched barrier backends defer
-                // that until here) before the manifest can be written.
+                // Queue drained: write whatever the shared builder still
+                // holds. Appends happen only before a thread's own drain,
+                // so the last thread to get here sees every leftover.
+                let rest = {
+                    let mut b = lock(&builder);
+                    (!b.is_empty()).then(|| std::mem::replace(&mut *b, PackBuilder::new()))
+                };
+                if let Some(rest) = rest
+                    && let Err(e) = flush(&mut writer, rest)
+                {
+                    record_error(&errors, e);
+                    return;
+                }
+                // Make every pack of this writer durable under its final
+                // name (batched barrier backends defer that until here)
+                // before the index and the manifest can be written.
                 let started = Instant::now();
                 let finished = writer.finish();
                 times.add(&times.finish_ns, started);
@@ -570,9 +623,12 @@ impl ChunkPipeline {
                             break;
                         }
                     };
-                    let rel = Repository::chunk_rel(&chunk.hash);
                     let started = Instant::now();
-                    let sent = tx.send(SealedChunk { rel, blob });
+                    let sent = tx.send(SealedChunk {
+                        hash: chunk.hash,
+                        plain_len: chunk.data.len() as u64,
+                        blob,
+                    });
                     times.add(&times.sealed_wait_ns, started);
                     if sent.is_err() {
                         break; // upload side gone; its error is recorded
@@ -588,6 +644,7 @@ impl ChunkPipeline {
             first_error,
             workers,
             times,
+            packs,
         })
     }
 
@@ -626,8 +683,9 @@ impl ChunkPipeline {
     ///
     /// # Errors
     ///
-    /// Returns the first worker error recorded during the run.
-    fn finish(self) -> crate::Result<()> {
+    /// Returns the first worker error recorded during the run. On success
+    /// returns the index entries of every pack written (all durable).
+    fn finish(self) -> crate::Result<Vec<IndexPack>> {
         // Dropping the senders disconnects the queues; workers drain what
         // is left and exit, and join() waits for all of them.
         let Self {
@@ -637,13 +695,17 @@ impl ChunkPipeline {
             first_error,
             workers,
             times: _,
+            packs,
         } = self;
         drop(raw_tx);
         drop(sealed_tx);
         for handle in workers {
             let _ = handle.join();
         }
-        lock(&first_error).take().map_or(Ok(()), Err)
+        if let Some(e) = lock(&first_error).take() {
+            return Err(e);
+        }
+        Ok(std::mem::take(&mut *lock(&packs)))
     }
 
     fn take_error(&self) -> Option<crate::Error> {
@@ -668,11 +730,13 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Snapshot of every chunk the repository already holds, built once per
-/// run. Malformed names (temp files, foreign files) are skipped: they are
-/// not valid chunks and must not shadow a real hash.
+/// Snapshot of every chunk the repository already holds (loose v1 chunk
+/// files plus chunks listed by the pack index files), built once per run.
+/// Malformed names (temp files, foreign files) are skipped: they are not
+/// valid chunks and must not shadow a real hash.
 fn load_chunk_index(repo: &Repository) -> crate::Result<HashSet<ChunkHash>> {
-    let mut index = HashSet::new();
+    repo.invalidate_pack_index();
+    let mut index: HashSet<ChunkHash> = repo.packed_chunk_hashes()?.into_iter().collect();
     for rel in repo.list_chunks()? {
         let Some((name, _)) = rel.rsplit_once('/') else {
             continue;

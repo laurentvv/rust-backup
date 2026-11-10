@@ -646,14 +646,22 @@ fn roundtrip(allow_exec: bool) {
             .unwrap_or_default()
             .trim_start_matches('/'),
     );
-    let chunks_dir = repo_dir.join("chunks");
-    let chunk_count = walkdir::WalkDir::new(&chunks_dir)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .count();
-    assert_eq!(chunk_count as u64, stats.chunks_new, "chunks on server");
+    let files_in = |sub: &str| {
+        walkdir::WalkDir::new(repo_dir.join(sub))
+            .min_depth(1)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .count()
+    };
+    assert_eq!(files_in("chunks"), 0, "no loose chunks in a v2 repository");
+    assert_eq!(files_in("packs"), 1, "one pack holds the small corpus");
+    assert_eq!(files_in("index"), 1, "one index file per run");
+    assert_eq!(
+        repo.packed_blob_count().expect("blobs"),
+        stats.chunks_new,
+        "blobs in packs"
+    );
     assert_eq!(temp_files_under(&repo_dir), 0, "no temp file left behind");
     if allow_exec {
         assert!(syncs.load(Ordering::SeqCst) >= 1, "barrier sync used");
@@ -690,6 +698,54 @@ fn roundtrip(allow_exec: bool) {
         std::fs::read(source.join("docs/notes.txt")).expect("original")
     );
 
+    // Directory restore from packs over SFTP is byte-identical too.
+    let dir_target = base.join("restored-dir");
+    let dir_stats = restore(
+        &repo,
+        &manifest.id,
+        &[RestoreSelection {
+            source_root: source.clone(),
+            rel_path: PathBuf::from("docs"),
+        }],
+        &RestoreDestination::Target(dir_target.clone()),
+        &RestoreOptions::default(),
+        |_| Ok(()),
+    )
+    .expect("directory restore over sftp");
+    assert!(dir_stats.files_restored >= 1);
+    assert_eq!(
+        std::fs::read(dir_target.join("src/docs/notes.txt")).expect("restored"),
+        std::fs::read(source.join("docs/notes.txt")).expect("original")
+    );
+
+    backend.close().ok();
+}
+
+#[test]
+fn sftp_read_range_reads_only_requested_bytes_and_errors_on_short_file() {
+    let (key_path, public) = write_key_file(None);
+    let (port, _root, _syncs) = spawn_server_with(public, true);
+    let backend = SftpBackend::connect(&connect_params(port, &key_path, None)).expect("connect");
+    let data = random_bytes(300_000, 9);
+    backend
+        .write_atomic("packs/ab/r.pack", &data)
+        .expect("write");
+    assert_eq!(
+        backend
+            .read_range("packs/ab/r.pack", 1_000, 70_000)
+            .expect("range"),
+        &data[1_000..71_000]
+    );
+    assert_eq!(
+        backend
+            .read_range("packs/ab/r.pack", 299_990, 10)
+            .expect("tail"),
+        &data[299_990..]
+    );
+    assert!(
+        backend.read_range("packs/ab/r.pack", 299_990, 11).is_err(),
+        "range past the end of the file must error"
+    );
     backend.close().ok();
 }
 
@@ -764,66 +820,41 @@ fn sftp_host_key_tofu_pins_and_detects_changes() {
 
 #[test]
 fn sftp_batched_durability_flushes_full_batches_mid_run() {
-    // More chunks than one writer's batch (256): forces barrier + rename
-    // batches during the run, not only at finish.
+    // The backup engine now writes a handful of packs per run, so the batch
+    // mechanism is exercised at the `ChunkWriter` level: more files than one
+    // batch (256) force a barrier + rename batch BEFORE `finish`, not only
+    // at the end.
     let (key_path, public) = write_key_file(None);
     let (port, server_root, syncs) = spawn_server_with(public, true);
-    let base = std::env::temp_dir().join(format!("rb-sftp-batch-{}", Uuid::new_v4()));
-    let source = base.join("src");
-    std::fs::create_dir_all(&source).expect("src");
-    for i in 0..1200_u64 {
-        std::fs::write(
-            source.join(format!("f{i:04}.bin")),
-            random_bytes(300, 2 * i + 1),
-        )
-        .expect("small file");
-    }
-
     let params = connect_params(port, &key_path, None);
     let backend = SftpBackend::connect(&params).expect("connect");
-    let repo = Repository::init(
-        Arc::new(backend.clone()),
-        "batch passphrase",
-        ChunkerConfig::default(),
-        3,
-        fast_kdf(),
-    )
-    .expect("init");
-    let job = JobConfig {
-        id: Uuid::new_v4(),
-        name: "batch-job".into(),
-        sources: vec![source.clone()],
-        destination: Destination::Sftp {
-            host: "127.0.0.1".into(),
-            port,
-            username: "tester".into(),
-            key_path: key_path.clone(),
-            remote_root: params.remote_root.clone(),
-        },
-        compression_level: 3,
-        excludes: vec![],
-        max_incrementals: 10,
-        created_at: chrono::Utc::now(),
-    };
-    let (manifest, stats) =
-        run_backup(&repo, &job, &BackupOptions::default(), |_| Ok(())).expect("backup");
-    assert_eq!(manifest.file_count(), 1200);
-    assert_eq!(stats.chunks_new, 1200);
+
+    let mut writer = backend.open_writer().expect("writer");
+    for i in 0..600_u64 {
+        writer
+            .write_new(
+                &format!("packs/ab/{i:04}.bin"),
+                &random_bytes(300, 2 * i + 1),
+            )
+            .expect("write_new");
+    }
+    let before_finish = syncs.load(Ordering::SeqCst);
+    assert!(
+        before_finish >= 2,
+        "two full batches (256 each) synced mid-run, got {before_finish}"
+    );
+    writer.finish().expect("finish");
+    assert!(
+        syncs.load(Ordering::SeqCst) > before_finish,
+        "final barrier"
+    );
 
     let repo_dir = server_root.join(params.remote_root.trim_start_matches('/'));
     assert_eq!(
         temp_files_under(&repo_dir),
         0,
-        "every chunk renamed into place"
+        "every file renamed into place"
     );
-    // At least one mid-run batch per writer on top of the final barriers.
-    assert!(
-        syncs.load(Ordering::SeqCst) >= 5,
-        "syncs: {}",
-        syncs.load(Ordering::SeqCst)
-    );
-
-    let report = verify(&repo, VerifyMode::Full, None, |_, _| Ok(())).expect("verify");
-    assert!(report.ok(), "issues: {:?}", report.issues);
+    assert_eq!(backend.list("packs").expect("list").len(), 600);
     backend.close().ok();
 }

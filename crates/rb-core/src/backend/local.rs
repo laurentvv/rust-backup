@@ -47,6 +47,15 @@ impl StorageBackend for LocalFs {
         Ok(std::fs::read(self.resolve(rel))?)
     }
 
+    fn read_range(&self, rel: &str, offset: u64, len: u64) -> crate::Result<Vec<u8>> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let mut file = std::fs::File::open(self.resolve(rel))?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; usize::try_from(len).map_err(std::io::Error::other)?];
+        file.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
     fn write_atomic(&self, rel: &str, data: &[u8]) -> crate::Result<()> {
         let target = self.resolve(rel);
         if let Some(parent) = target.parent() {
@@ -197,6 +206,25 @@ mod tests {
             be.list("snapshots").expect("list"),
             vec!["snapshots/s.snap".to_string()]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_range_returns_only_requested_bytes_and_errors_on_short_file() {
+        let dir = std::env::temp_dir().join(format!("rb-localbe-{}", Uuid::new_v4()));
+        let be = LocalFs::new(&dir);
+        be.write_atomic("packs/ab/x.pack", b"0123456789")
+            .expect("write");
+        assert_eq!(
+            be.read_range("packs/ab/x.pack", 3, 4).expect("range"),
+            b"3456"
+        );
+        assert_eq!(be.read_range("packs/ab/x.pack", 10, 0).expect("empty"), b"");
+        assert!(
+            be.read_range("packs/ab/x.pack", 8, 4).is_err(),
+            "short file"
+        );
+        assert!(be.read_range("packs/ab/missing.pack", 0, 1).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

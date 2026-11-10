@@ -171,13 +171,17 @@ fn full_then_incremental_backups_dedup_and_never_touch_sources() {
     assert_eq!(got, expected, "snapshot must capture the whole tree");
     assert!(s1.chunks_new >= 3, "full run stores several chunks");
 
-    // Repository layout sanity: config, key, chunks, one manifest.
+    // Repository layout sanity: config, key, packs, one manifest.
     let backend = LocalFs::new(&fixture.dest);
     assert!(backend.exists("config.json").expect("config exists"));
     assert_eq!(backend.list("keys").expect("keys").len(), 1);
     assert_eq!(backend.list("snapshots").expect("snaps").len(), 1);
-    let chunk_files = backend.list("chunks").expect("chunks");
-    assert_eq!(chunk_files.len() as u64, s1.chunks_new);
+    // v2 layout: new chunks live in packs, not as loose chunk files.
+    assert!(backend.list("chunks").expect("chunks").is_empty());
+    assert_eq!(
+        fixture.repo.packed_blob_count().expect("blobs"),
+        s1.chunks_new
+    );
 
     // --- Run 2: nothing changed -> zero new chunks ----------------------
     let (_m2, s2) = backup(&fixture);
@@ -417,11 +421,11 @@ fn identical_files_within_one_run_are_stored_once() {
     let (manifest, stats) = backup(&fixture);
 
     let backend = LocalFs::new(&fixture.dest);
-    let chunk_files = backend.list("chunks").expect("chunks");
+    assert!(backend.list("chunks").expect("chunks").is_empty());
     assert_eq!(
-        chunk_files.len() as u64,
+        fixture.repo.packed_blob_count().expect("blobs"),
         stats.chunks_new,
-        "one physical chunk file per new chunk, no duplicates"
+        "one physical blob per new chunk, no duplicates"
     );
     assert!(stats.chunks_new > 0);
 
@@ -469,11 +473,19 @@ fn parallel_pipeline_writes_valid_chunks_and_no_temp_leftovers() {
     );
 
     let backend = LocalFs::new(&fixture.dest);
-    let chunk_files = backend.list("chunks").expect("chunks");
-    assert_eq!(chunk_files.len() as u64, stats.chunks_new);
+    assert_eq!(
+        fixture.repo.packed_blob_count().expect("blobs"),
+        stats.chunks_new
+    );
+    let stored: Vec<String> = ["packs", "index"]
+        .iter()
+        .flat_map(|dir| backend.list(dir).expect("list"))
+        .collect();
     assert!(
-        chunk_files.iter().all(|rel| rel.ends_with(".chunk")),
-        "no temp files may survive a successful run: {chunk_files:?}"
+        stored
+            .iter()
+            .all(|rel| rel.ends_with(".pack") || rel.ends_with(".idx")),
+        "no temp files may survive a successful run: {stored:?}"
     );
 
     // Round-trip a sample of chunks through decrypt+decompress: parallel
@@ -509,6 +521,9 @@ impl StorageBackend for FailingBackend {
     }
     fn read(&self, rel: &str) -> rb_core::Result<Vec<u8>> {
         self.inner.read(rel)
+    }
+    fn read_range(&self, rel: &str, offset: u64, len: u64) -> rb_core::Result<Vec<u8>> {
+        self.inner.read_range(rel, offset, len)
     }
     fn write_atomic(&self, rel: &str, data: &[u8]) -> rb_core::Result<()> {
         self.inner.write_atomic(rel, data)
@@ -565,7 +580,8 @@ fn upload_failure_aborts_run_and_leaves_no_manifest() {
     let failing = FailingBackend {
         inner: LocalFs::new(&fixture.dest),
         writes: Arc::new(AtomicU64::new(0)),
-        fail_at: 3,
+        // One pack holds the whole ~4 MB corpus: the first pack write fails.
+        fail_at: 1,
     };
     let repo = Repository::open(Arc::new(failing), "integration passphrase")
         .expect("open via failing backend");

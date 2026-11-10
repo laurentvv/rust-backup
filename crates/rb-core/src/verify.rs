@@ -3,8 +3,10 @@
 //! - **Quick**: every chunk referenced by every manifest exists, and every
 //!   manifest authenticates.
 //! - **Full**: additionally read + authenticate + re-hash every referenced
-//!   chunk, and report orphan chunk files (stored but unreferenced —
-//!   harmless, they only waste space).
+//!   chunk, check every pack trailer against the index, and report orphan
+//!   chunks (loose files or pack blobs stored but unreferenced — harmless,
+//!   they only waste space) and unindexed packs (left by a crash between
+//!   pack write and index write; `prune` removes them).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -56,8 +58,11 @@ pub struct VerifyReport {
     pub manifests_checked: usize,
     /// Distinct chunks checked.
     pub chunks_checked: usize,
-    /// Chunks present in the store but referenced by no manifest.
+    /// Chunks present in the store (loose or in a pack) but referenced by
+    /// no manifest.
     pub orphan_chunks: usize,
+    /// Pack files present on the backend but listed by no index file.
+    pub unindexed_packs: usize,
     /// Problems found (empty when the repository is healthy).
     pub issues: Vec<VerifyIssue>,
 }
@@ -108,11 +113,13 @@ pub fn verify(
         manifests_checked: 0,
         chunks_checked: 0,
         orphan_chunks: 0,
+        unindexed_packs: 0,
         issues: Vec::new(),
     };
 
     // Shared lock: concurrent prune would make live chunks look missing.
     let _lock = repo.acquire_shared_lock("verify")?;
+    repo.invalidate_pack_index();
 
     // 1. Load and authenticate every manifest, collecting references.
     let mut referenced: BTreeMap<String, u64> = BTreeMap::new();
@@ -170,18 +177,47 @@ pub fn verify(
         report.chunks_checked += 1;
     }
 
-    // 3. Orphan chunks: stored but referenced nowhere (informational).
-    let stored = repo.list_chunks()?;
-    for rel in &stored {
+    // 3. Packs: in full mode every trailer must match the index (detects
+    // index/pack drift and a damaged trailer).
+    let index = repo.pack_index()?;
+    if mode == VerifyMode::Full {
+        for (pack_id, expected) in &index.packs {
+            if let Some(flag) = &cancel
+                && flag.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(crate::Error::Cancelled);
+            }
+            if !index.existing_packs.contains(pack_id) {
+                continue; // already reported MISSING per referenced chunk
+            }
+            for message in repo.check_pack_against_index(pack_id, expected) {
+                report.issues.push(VerifyIssue { message });
+            }
+        }
+    }
+    report.unindexed_packs = index
+        .existing_packs
+        .iter()
+        .filter(|id| !index.packs.contains_key(*id))
+        .count();
+
+    // 4. Orphan chunks: stored but referenced nowhere (informational).
+    let mut stored: std::collections::BTreeSet<String> =
+        index.blobs.keys().map(ChunkHash::to_hex).collect();
+    for rel in repo.list_chunks()? {
         let hex = rel
             .rsplit('/')
             .next()
             .unwrap_or_default()
             .trim_end_matches(".chunk");
-        if !referenced.contains_key(hex) {
-            report.orphan_chunks += 1;
+        if rel.ends_with(".chunk") {
+            stored.insert(hex.to_owned());
         }
     }
+    report.orphan_chunks = stored
+        .iter()
+        .filter(|hex| !referenced.contains_key(*hex))
+        .count();
 
     report.finished_at = Utc::now();
     Ok(report)

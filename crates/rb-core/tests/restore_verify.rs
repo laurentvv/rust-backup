@@ -266,26 +266,23 @@ fn verify_quick_passes_then_full_detects_and_names_corruption() {
     let full = verify(&fixture.repo, VerifyMode::Full, None, |_, _| Ok(())).expect("verify full");
     assert!(full.ok(), "full must pass on healthy repo");
 
-    // Corrupt one stored chunk (flip a byte in the middle of a chunk file).
-    let chunk_files = {
-        let backend = LocalFs::new(&fixture.dest);
-        backend.list("chunks").expect("chunks")
-    };
-    assert!(!chunk_files.is_empty());
-    let victim = fixture.dest.join(
-        chunk_files
-            .first()
-            .expect("victim")
-            .replace('/', std::path::MAIN_SEPARATOR_STR),
-    );
-    let victim_name = chunk_files[0]
-        .rsplit('/')
-        .next()
-        .expect("name")
-        .trim_end_matches(".chunk")
-        .to_string();
-    let mut blob = std::fs::read(&victim).expect("read chunk");
-    let mid = blob.len() / 2;
+    // Corrupt one stored chunk (flip a byte in the middle of its blob
+    // inside the pack file).
+    let victim_hash = manifest
+        .iter_files()
+        .find_map(|(_, e)| e.chunks.first().map(|c| c.hash))
+        .expect("a chunk");
+    let (pack_rel, offset, length) = fixture
+        .repo
+        .chunk_location(&victim_hash)
+        .expect("location")
+        .expect("chunk is stored in a pack");
+    let victim = fixture
+        .dest
+        .join(pack_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let victim_name = victim_hash.to_hex();
+    let mut blob = std::fs::read(&victim).expect("read pack");
+    let mid = usize::try_from(offset + length / 2).expect("offset");
     blob[mid] ^= 0x40;
     std::fs::write(&victim, &blob).expect("corrupt chunk");
 

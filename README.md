@@ -109,6 +109,12 @@ USB 3 TB HDD mounted as NTFS through ntfs-3g on Linux, RTT < 1 ms:*
 fsync (4 writers) → **25.8 s** with batched durability and 8 writers. Reproduce with
 `scripts/make_bench_corpus.py` + `scripts/bench_sftp.sh`.
 
+**Pack files (repository format v2):** new chunks are stored in ~16 MiB pack files (restic/kopia style)
+instead of one file per chunk, so the same 4 000-file corpus lands in 10 files on the server:
+45.5 s → 25.8 s → **16.0 s**; mixed corpus 74.6 s → 64.5 s → **57.0 s**. Per-file and per-directory
+restore read only the needed byte ranges. Format and crash-consistency rules: `docs/design/pack-format.md`,
+`docs/REPO_FORMAT.md`. Older repositories (one file per chunk) stay readable.
+
 On that destination the remaining ceiling is physical: the USB HDD writes ~60 MB/s
 sequentially and accepts ~170 new files/s through ntfs-3g whatever the client (measured
 with an independent SFTP client), so many small chunk files and several interleaved

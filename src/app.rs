@@ -24,7 +24,7 @@ use rb_core::backup::BackupEvent;
 use rb_core::catalog::Catalog;
 use rb_core::domain::{Destination, JobConfig, JobId, RunRecord, RunStatus};
 
-use crate::i18n::{self, Lang, format_eta, human_bytes_lang};
+use crate::i18n::{self, Lang, format_eta, format_local, human_bytes_lang};
 use crate::runner::{self, EngineEvent};
 use crate::theme;
 
@@ -137,6 +137,8 @@ pub struct RustBackupApp {
     cancel: Option<Arc<AtomicBool>>,
 
     toast: Option<(bool, String)>, // (is_error, message)
+    /// Set while the local catalog cannot be read; shown as a banner.
+    catalog_error: Option<String>,
 
     // --- restore browser state ---
     snapshots: Vec<runner::SnapshotRow>,
@@ -306,6 +308,7 @@ impl RustBackupApp {
             run_current_file: String::new(),
             cancel: None,
             toast: None,
+            catalog_error: None,
             snapshots: Vec::new(),
             selected_snapshot: None,
             selected_restore_job: None,
@@ -344,6 +347,31 @@ impl RustBackupApp {
         // Palette applied once at startup; runtime switching happens in
         // Settings via theme::apply_brand_theme.
         app.refresh_catalog();
+        // The catalog can change under the window (CLI or scheduled runs):
+        // re-read it every few seconds while the app is idle.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+                let Ok(()) = this.update(cx, |app, cx| {
+                    let busy = matches!(app.phase, RunPhase::Running { .. })
+                        || app.verify_busy
+                        || app.restore_busy;
+                    if busy {
+                        return;
+                    }
+                    let before = app.catalog_fingerprint();
+                    app.refresh_catalog();
+                    if app.catalog_fingerprint() != before {
+                        cx.notify();
+                    }
+                }) else {
+                    break;
+                };
+            }
+        })
+        .detach();
         app
     }
 
@@ -358,15 +386,28 @@ impl RustBackupApp {
 
     /// Reloads jobs, recent runs and aggregate stats from the local catalog.
     fn refresh_catalog(&mut self) {
-        let Some(path) = self.catalog_path() else {
-            return;
+        self.catalog_error = match self.load_catalog() {
+            Ok(()) => None,
+            Err(()) => Some(self.texts().catalog_unreadable.to_string()),
         };
-        let Ok(catalog) = Catalog::open(&path) else {
-            return;
-        };
-        let Ok(jobs) = catalog.list_jobs() else {
-            return;
-        };
+    }
+
+    /// Cheap fingerprint used to redraw only when the catalog content changed.
+    fn catalog_fingerprint(&self) -> (usize, usize, Option<uuid::Uuid>, usize, bool) {
+        (
+            self.jobs.len(),
+            self.cached_snapshot_count,
+            self.recent_runs.first().map(|(_, run)| run.id),
+            self.verify_outcomes.len(),
+            self.catalog_error.is_some(),
+        )
+    }
+
+    /// Reads jobs, runs and stats; `Err` when the catalog cannot be opened.
+    fn load_catalog(&mut self) -> Result<(), ()> {
+        let path = self.catalog_path().ok_or(())?;
+        let catalog = Catalog::open(&path).map_err(|_| ())?;
+        let jobs = catalog.list_jobs().map_err(|_| ())?;
         self.jobs = jobs;
 
         if self.selected_restore_job.is_none()
@@ -401,6 +442,7 @@ impl RustBackupApp {
         if let Ok(outcomes) = catalog.list_verify_results(50) {
             self.verify_outcomes = outcomes;
         }
+        Ok(())
     }
 
     fn start_backup(&mut self, cx: &mut gpui::Context<Self>, job_id: JobId) {
@@ -3033,7 +3075,14 @@ impl RustBackupApp {
                     .border_color(cx.theme().border)
                     .text_size(px(13.0))
                     .text_color(cx.theme().muted_foreground)
-                    .child(t.no_snapshots)
+                    .child(
+                        if self.cached_snapshot_count > 0 && self.current_passphrase(cx).is_empty()
+                        {
+                            t.snapshots_need_passphrase
+                        } else {
+                            t.no_snapshots
+                        },
+                    )
                     .into_any_element()
             } else {
                 let mut snap_list = v_flex().gap_1();
@@ -3257,8 +3306,8 @@ impl RustBackupApp {
                     .text_color(cx.theme().muted_foreground)
                     .child(div().w(px(160.0)).child(t.jobs.to_string()))
                     .child(div().w(px(80.0)).child(t.status))
-                    .child(div().w(px(90.0)).child(t.cadence_badge))
-                    .child(div().flex_1().child("UTC"))
+                    .child(div().w(px(120.0)).child(t.cadence_badge))
+                    .child(div().flex_1().child(t.date_col))
                     .child(div().w(px(90.0)).child(t.files_done))
                     .child(div().w(px(90.0)).child(t.new_chunks));
 
@@ -3279,7 +3328,8 @@ impl RustBackupApp {
                             .child(div().w(px(80.0)).text_color(color).child(label.to_string()))
                             .child(
                                 div()
-                                    .w(px(90.0))
+                                    .w(px(120.0))
+                                    .whitespace_nowrap()
                                     .text_color(if run.kind == rb_core::domain::BackupKind::Full {
                                         cx.theme().primary
                                     } else {
@@ -3295,7 +3345,7 @@ impl RustBackupApp {
                                 div()
                                     .flex_1()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(run.started_at.to_rfc3339()),
+                                    .child(format_local(run.started_at, self.lang)),
                             )
                             .child(div().w(px(90.0)).child(run.files_total.to_string()))
                             .child(div().w(px(90.0)).child(run.chunks_new.to_string()))
@@ -3739,24 +3789,28 @@ impl gpui::Render for RustBackupApp {
             Section::Settings => self.render_settings(cx).into_any_element(),
         };
 
-        let toast = self.toast.clone().map(|(is_error, message)| {
-            let color = if is_error {
-                cx.theme().danger
-            } else {
-                cx.theme().success
-            };
-            div()
-                .id("toast")
-                .px_4()
-                .py_2()
-                .rounded_md()
-                .bg(color.opacity(0.15))
-                .border_1()
-                .border_color(color.opacity(0.5))
-                .text_size(px(12.0))
-                .text_color(cx.theme().foreground)
-                .child(message)
-        });
+        let toast = self
+            .toast
+            .clone()
+            .or_else(|| self.catalog_error.clone().map(|m| (true, m)))
+            .map(|(is_error, message)| {
+                let color = if is_error {
+                    cx.theme().danger
+                } else {
+                    cx.theme().success
+                };
+                div()
+                    .id("toast")
+                    .px_4()
+                    .py_2()
+                    .rounded_md()
+                    .bg(color.opacity(0.15))
+                    .border_1()
+                    .border_color(color.opacity(0.5))
+                    .text_size(px(12.0))
+                    .text_color(cx.theme().foreground)
+                    .child(message)
+            });
 
         div()
             .track_focus(&self.focus_handle)

@@ -132,6 +132,12 @@ pub struct Texts {
     pub restore_failed: &'static str,
     /// Empty snapshot list.
     pub no_snapshots: &'static str,
+    /// Restore page: snapshots exist but the passphrase is not set yet.
+    pub snapshots_need_passphrase: &'static str,
+    /// Banner shown when the local catalog cannot be read.
+    pub catalog_unreadable: &'static str,
+    /// History table: date column header.
+    pub date_col: &'static str,
     /// Button: verify (quick).
     pub verify: &'static str,
     /// Files selected counter.
@@ -319,6 +325,9 @@ pub const FR: Texts = Texts {
     restored: "Restauration terminée",
     restore_failed: "Échec de la restauration",
     no_snapshots: "Aucun instantané — lancez d'abord une sauvegarde (et définissez la phrase secrète dans Paramètres).",
+    snapshots_need_passphrase: "Des instantanés existent : définissez la phrase secrète dans Paramètres, puis cliquez sur Actualiser.",
+    catalog_unreadable: "Catalogue illisible (verrouillé par un autre processus ?) : nouvelle tentative automatique.",
+    date_col: "Date",
     verify: "Vérifier",
     selected_files: "fichiers sélectionnés",
     passphrase_needed: "Définissez la phrase secrète dans Paramètres.",
@@ -444,6 +453,9 @@ pub const EN: Texts = Texts {
     restored: "Restore complete",
     restore_failed: "Restore failed",
     no_snapshots: "No snapshot yet — run a backup first (and set the passphrase in Settings).",
+    snapshots_need_passphrase: "Snapshots exist: set the passphrase in Settings, then click Refresh.",
+    catalog_unreadable: "Catalog unreadable (locked by another process?): retrying automatically.",
+    date_col: "Date",
     verify: "Verify",
     selected_files: "files selected",
     passphrase_needed: "Set the passphrase in Settings.",
@@ -536,6 +548,16 @@ pub fn human_bytes_lang(bytes: u64, lang: Lang) -> String {
         format!("{bytes} {}", units[0])
     } else {
         format!("{value:.1} {}", units[unit])
+    }
+}
+
+/// Local date and time for tables: `12/11/2026 11:55` (FR) or `2026-11-12 11:55` (EN).
+#[must_use]
+pub fn format_local(dt: chrono::DateTime<chrono::Utc>, lang: Lang) -> String {
+    let local = dt.with_timezone(&chrono::Local);
+    match lang {
+        Lang::Fr => local.format("%d/%m/%Y %H:%M").to_string(),
+        Lang::En => local.format("%Y-%m-%d %H:%M").to_string(),
     }
 }
 

@@ -138,6 +138,14 @@ pub struct Texts {
     pub catalog_unreadable: &'static str,
     /// History table: date column header.
     pub date_col: &'static str,
+    /// zstd level buttons in the job form.
+    pub level_none: &'static str,
+    /// zstd level 1.
+    pub level_fast: &'static str,
+    /// zstd level 5 (default).
+    pub level_balanced: &'static str,
+    /// zstd level 15.
+    pub level_high: &'static str,
     /// Button: verify (quick).
     pub verify: &'static str,
     /// Files selected counter.
@@ -328,6 +336,10 @@ pub const FR: Texts = Texts {
     snapshots_need_passphrase: "Des instantanés existent : définissez la phrase secrète dans Paramètres, puis cliquez sur Actualiser.",
     catalog_unreadable: "Catalogue illisible (verrouillé par un autre processus ?) : nouvelle tentative automatique.",
     date_col: "Date",
+    level_none: "0 (aucune)",
+    level_fast: "1 (rapide)",
+    level_balanced: "5 (équilibrée)",
+    level_high: "15 (élevée)",
     verify: "Vérifier",
     selected_files: "fichiers sélectionnés",
     passphrase_needed: "Définissez la phrase secrète dans Paramètres.",
@@ -456,6 +468,10 @@ pub const EN: Texts = Texts {
     snapshots_need_passphrase: "Snapshots exist: set the passphrase in Settings, then click Refresh.",
     catalog_unreadable: "Catalog unreadable (locked by another process?): retrying automatically.",
     date_col: "Date",
+    level_none: "0 (none)",
+    level_fast: "1 (fast)",
+    level_balanced: "5 (balanced)",
+    level_high: "15 (high)",
     verify: "Verify",
     selected_files: "files selected",
     passphrase_needed: "Set the passphrase in Settings.",

@@ -272,8 +272,7 @@ impl RustBackupApp {
             form_name: cx.new(|cx| InputState::new(window, cx).placeholder("documents")),
             form_source: cx
                 .new(|cx| InputState::new(window, cx).placeholder(r"C:\Users\moi\Documents")),
-            form_dest: cx
-                .new(|cx| InputState::new(window, cx).placeholder(r"E:\Sauvegardes\depot")),
+            form_dest: cx.new(|cx| InputState::new(window, cx).placeholder(r"E:\Backups\repo")),
             form_is_sftp: false,
             form_sftp_host: cx
                 .new(|cx| InputState::new(window, cx).placeholder("backup.example.com")),
@@ -316,8 +315,7 @@ impl RustBackupApp {
                 InputState::new(window, cx)
                     .placeholder(crate::i18n::Lang::default().texts().search_files)
             }),
-            restore_target: cx
-                .new(|cx| InputState::new(window, cx).placeholder(r"D:\Restauration")),
+            restore_target: cx.new(|cx| InputState::new(window, cx).placeholder(r"D:\Restored")),
             selected_paths: std::collections::BTreeSet::new(),
             restore_to_original: false,
             restore_overwrite: false,
@@ -373,6 +371,20 @@ impl RustBackupApp {
         })
         .detach();
         app
+    }
+
+    /// The search box placeholder is fixed at creation: recreate it on a
+    /// language switch so it follows the UI language.
+    fn rebuild_search_input(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let placeholder = self.texts().search_files;
+        self.restore_search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+    }
+
+    /// RFC 3339 timestamp from the catalog, shown in local time.
+    fn display_date(&self, raw: &str) -> String {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .map(|dt| format_local(dt.with_timezone(&chrono::Utc), self.lang))
+            .unwrap_or_else(|_| raw.to_string())
     }
 
     fn texts(&self) -> &'static i18n::Texts {
@@ -2032,7 +2044,7 @@ impl RustBackupApp {
                                 .gap_2()
                                 .child(
                                     Button::new("comp-0")
-                                        .label("0 (aucun)")
+                                        .label(t.level_none)
                                         .when(self.form_compression == 0, |b| b.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.form_compression = 0;
@@ -2041,7 +2053,7 @@ impl RustBackupApp {
                                 )
                                 .child(
                                     Button::new("comp-1")
-                                        .label("1 (rapide)")
+                                        .label(t.level_fast)
                                         .when(self.form_compression == 1, |b| b.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.form_compression = 1;
@@ -2050,7 +2062,7 @@ impl RustBackupApp {
                                 )
                                 .child(
                                     Button::new("comp-5")
-                                        .label("5 (équilibré)")
+                                        .label(t.level_balanced)
                                         .when(self.form_compression == 5, |b| b.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.form_compression = 5;
@@ -2059,7 +2071,7 @@ impl RustBackupApp {
                                 )
                                 .child(
                                     Button::new("comp-15")
-                                        .label("15 (max)")
+                                        .label(t.level_high)
                                         .when(self.form_compression == 15, |b| b.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.form_compression = 15;
@@ -2648,7 +2660,7 @@ impl RustBackupApp {
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(row.created_at.clone()),
+                                    .child(self.display_date(&row.created_at)),
                             )
                             .child(
                                 div()
@@ -2693,7 +2705,7 @@ impl RustBackupApp {
                         .icon(IconName::Trash)
                         .on_click(cx.listener({
                             let entity = cx.entity().clone();
-                            let snap_date = row.created_at.clone();
+                            let snap_date = self.display_date(&row.created_at);
                             move |this, _, window, cx| {
                                 let entity = entity.clone();
                                 let snap_date = snap_date.clone();
@@ -3445,7 +3457,7 @@ impl RustBackupApp {
                                 div()
                                     .w(px(180.0))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(outcome.finished_at.to_rfc3339()),
+                                    .child(format_local(outcome.finished_at, self.lang)),
                             )
                             .child(
                                 div()
@@ -3527,8 +3539,9 @@ impl RustBackupApp {
                                 Button::new("lang-fr")
                                     .label("Français")
                                     .when(self.lang == Lang::Fr, |b| b.primary())
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.lang = Lang::Fr;
+                                        this.rebuild_search_input(window, cx);
                                         cx.notify();
                                     })),
                             )
@@ -3536,8 +3549,9 @@ impl RustBackupApp {
                                 Button::new("lang-en")
                                     .label("English")
                                     .when(self.lang == Lang::En, |b| b.primary())
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.lang = Lang::En;
+                                        this.rebuild_search_input(window, cx);
                                         cx.notify();
                                     })),
                             ),
@@ -3571,16 +3585,13 @@ impl RustBackupApp {
                             .gap_4()
                             .items_center()
                             .child(
-                                Switch::new("theme-switch")
-                                    .checked(self.dark)
-                                    .label(if self.dark {
-                                        t.theme_dark
-                                    } else {
-                                        t.theme_light
-                                    })
-                                    .on_change(cx.listener(|this, checked, _, cx| {
-                                        this.dark = *checked;
-                                        theme::apply_brand_theme(this.dark, cx);
+                                Button::new("theme-light")
+                                    .ghost()
+                                    .label(t.theme_light)
+                                    .when(!self.dark, |b| b.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.dark = false;
+                                        theme::apply_brand_theme(false, cx);
                                         cx.notify();
                                     })),
                             )
@@ -3592,17 +3603,6 @@ impl RustBackupApp {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.dark = true;
                                         theme::apply_brand_theme(true, cx);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("theme-light")
-                                    .ghost()
-                                    .label(t.theme_light)
-                                    .when(!self.dark, |b| b.primary())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.dark = false;
-                                        theme::apply_brand_theme(false, cx);
                                         cx.notify();
                                     })),
                             ),

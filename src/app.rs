@@ -24,7 +24,7 @@ use rb_core::backup::BackupEvent;
 use rb_core::catalog::Catalog;
 use rb_core::domain::{Destination, JobConfig, JobId, RunRecord, RunStatus};
 
-use crate::i18n::{self, Lang, format_eta, human_bytes_lang};
+use crate::i18n::{self, Lang, format_eta, format_local, human_bytes_lang};
 use crate::runner::{self, EngineEvent};
 use crate::theme;
 
@@ -137,6 +137,8 @@ pub struct RustBackupApp {
     cancel: Option<Arc<AtomicBool>>,
 
     toast: Option<(bool, String)>, // (is_error, message)
+    /// Set while the local catalog cannot be read; shown as a banner.
+    catalog_error: Option<String>,
 
     // --- restore browser state ---
     snapshots: Vec<runner::SnapshotRow>,
@@ -270,8 +272,7 @@ impl RustBackupApp {
             form_name: cx.new(|cx| InputState::new(window, cx).placeholder("documents")),
             form_source: cx
                 .new(|cx| InputState::new(window, cx).placeholder(r"C:\Users\moi\Documents")),
-            form_dest: cx
-                .new(|cx| InputState::new(window, cx).placeholder(r"E:\Sauvegardes\depot")),
+            form_dest: cx.new(|cx| InputState::new(window, cx).placeholder(r"E:\Backups\repo")),
             form_is_sftp: false,
             form_sftp_host: cx
                 .new(|cx| InputState::new(window, cx).placeholder("backup.example.com")),
@@ -306,6 +307,7 @@ impl RustBackupApp {
             run_current_file: String::new(),
             cancel: None,
             toast: None,
+            catalog_error: None,
             snapshots: Vec::new(),
             selected_snapshot: None,
             selected_restore_job: None,
@@ -313,8 +315,7 @@ impl RustBackupApp {
                 InputState::new(window, cx)
                     .placeholder(crate::i18n::Lang::default().texts().search_files)
             }),
-            restore_target: cx
-                .new(|cx| InputState::new(window, cx).placeholder(r"D:\Restauration")),
+            restore_target: cx.new(|cx| InputState::new(window, cx).placeholder(r"D:\Restored")),
             selected_paths: std::collections::BTreeSet::new(),
             restore_to_original: false,
             restore_overwrite: false,
@@ -344,7 +345,46 @@ impl RustBackupApp {
         // Palette applied once at startup; runtime switching happens in
         // Settings via theme::apply_brand_theme.
         app.refresh_catalog();
+        // The catalog can change under the window (CLI or scheduled runs):
+        // re-read it every few seconds while the app is idle.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+                let Ok(()) = this.update(cx, |app, cx| {
+                    let busy = matches!(app.phase, RunPhase::Running { .. })
+                        || app.verify_busy
+                        || app.restore_busy;
+                    if busy {
+                        return;
+                    }
+                    let before = app.catalog_fingerprint();
+                    app.refresh_catalog();
+                    if app.catalog_fingerprint() != before {
+                        cx.notify();
+                    }
+                }) else {
+                    break;
+                };
+            }
+        })
+        .detach();
         app
+    }
+
+    /// The search box placeholder is fixed at creation: recreate it on a
+    /// language switch so it follows the UI language.
+    fn rebuild_search_input(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        let placeholder = self.texts().search_files;
+        self.restore_search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+    }
+
+    /// RFC 3339 timestamp from the catalog, shown in local time.
+    fn display_date(&self, raw: &str) -> String {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .map(|dt| format_local(dt.with_timezone(&chrono::Utc), self.lang))
+            .unwrap_or_else(|_| raw.to_string())
     }
 
     fn texts(&self) -> &'static i18n::Texts {
@@ -358,15 +398,28 @@ impl RustBackupApp {
 
     /// Reloads jobs, recent runs and aggregate stats from the local catalog.
     fn refresh_catalog(&mut self) {
-        let Some(path) = self.catalog_path() else {
-            return;
+        self.catalog_error = match self.load_catalog() {
+            Ok(()) => None,
+            Err(()) => Some(self.texts().catalog_unreadable.to_string()),
         };
-        let Ok(catalog) = Catalog::open(&path) else {
-            return;
-        };
-        let Ok(jobs) = catalog.list_jobs() else {
-            return;
-        };
+    }
+
+    /// Cheap fingerprint used to redraw only when the catalog content changed.
+    fn catalog_fingerprint(&self) -> (usize, usize, Option<uuid::Uuid>, usize, bool) {
+        (
+            self.jobs.len(),
+            self.cached_snapshot_count,
+            self.recent_runs.first().map(|(_, run)| run.id),
+            self.verify_outcomes.len(),
+            self.catalog_error.is_some(),
+        )
+    }
+
+    /// Reads jobs, runs and stats; `Err` when the catalog cannot be opened.
+    fn load_catalog(&mut self) -> Result<(), ()> {
+        let path = self.catalog_path().ok_or(())?;
+        let catalog = Catalog::open(&path).map_err(|_| ())?;
+        let jobs = catalog.list_jobs().map_err(|_| ())?;
         self.jobs = jobs;
 
         if self.selected_restore_job.is_none()
@@ -401,6 +454,7 @@ impl RustBackupApp {
         if let Ok(outcomes) = catalog.list_verify_results(50) {
             self.verify_outcomes = outcomes;
         }
+        Ok(())
     }
 
     fn start_backup(&mut self, cx: &mut gpui::Context<Self>, job_id: JobId) {
@@ -1990,7 +2044,7 @@ impl RustBackupApp {
                                 .gap_2()
                                 .child(
                                     Button::new("comp-0")
-                                        .label("0 (aucun)")
+                                        .label(t.level_none)
                                         .when(self.form_compression == 0, |b| b.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.form_compression = 0;
@@ -1999,7 +2053,7 @@ impl RustBackupApp {
                                 )
                                 .child(
                                     Button::new("comp-1")
-                                        .label("1 (rapide)")
+                                        .label(t.level_fast)
                                         .when(self.form_compression == 1, |b| b.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.form_compression = 1;
@@ -2008,7 +2062,7 @@ impl RustBackupApp {
                                 )
                                 .child(
                                     Button::new("comp-5")
-                                        .label("5 (équilibré)")
+                                        .label(t.level_balanced)
                                         .when(self.form_compression == 5, |b| b.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.form_compression = 5;
@@ -2017,7 +2071,7 @@ impl RustBackupApp {
                                 )
                                 .child(
                                     Button::new("comp-15")
-                                        .label("15 (max)")
+                                        .label(t.level_high)
                                         .when(self.form_compression == 15, |b| b.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.form_compression = 15;
@@ -2606,7 +2660,7 @@ impl RustBackupApp {
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(row.created_at.clone()),
+                                    .child(self.display_date(&row.created_at)),
                             )
                             .child(
                                 div()
@@ -2651,7 +2705,7 @@ impl RustBackupApp {
                         .icon(IconName::Trash)
                         .on_click(cx.listener({
                             let entity = cx.entity().clone();
-                            let snap_date = row.created_at.clone();
+                            let snap_date = self.display_date(&row.created_at);
                             move |this, _, window, cx| {
                                 let entity = entity.clone();
                                 let snap_date = snap_date.clone();
@@ -3033,7 +3087,14 @@ impl RustBackupApp {
                     .border_color(cx.theme().border)
                     .text_size(px(13.0))
                     .text_color(cx.theme().muted_foreground)
-                    .child(t.no_snapshots)
+                    .child(
+                        if self.cached_snapshot_count > 0 && self.current_passphrase(cx).is_empty()
+                        {
+                            t.snapshots_need_passphrase
+                        } else {
+                            t.no_snapshots
+                        },
+                    )
                     .into_any_element()
             } else {
                 let mut snap_list = v_flex().gap_1();
@@ -3257,8 +3318,8 @@ impl RustBackupApp {
                     .text_color(cx.theme().muted_foreground)
                     .child(div().w(px(160.0)).child(t.jobs.to_string()))
                     .child(div().w(px(80.0)).child(t.status))
-                    .child(div().w(px(90.0)).child(t.cadence_badge))
-                    .child(div().flex_1().child("UTC"))
+                    .child(div().w(px(120.0)).child(t.cadence_badge))
+                    .child(div().flex_1().child(t.date_col))
                     .child(div().w(px(90.0)).child(t.files_done))
                     .child(div().w(px(90.0)).child(t.new_chunks));
 
@@ -3279,7 +3340,8 @@ impl RustBackupApp {
                             .child(div().w(px(80.0)).text_color(color).child(label.to_string()))
                             .child(
                                 div()
-                                    .w(px(90.0))
+                                    .w(px(120.0))
+                                    .whitespace_nowrap()
                                     .text_color(if run.kind == rb_core::domain::BackupKind::Full {
                                         cx.theme().primary
                                     } else {
@@ -3295,7 +3357,7 @@ impl RustBackupApp {
                                 div()
                                     .flex_1()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(run.started_at.to_rfc3339()),
+                                    .child(format_local(run.started_at, self.lang)),
                             )
                             .child(div().w(px(90.0)).child(run.files_total.to_string()))
                             .child(div().w(px(90.0)).child(run.chunks_new.to_string()))
@@ -3395,7 +3457,7 @@ impl RustBackupApp {
                                 div()
                                     .w(px(180.0))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(outcome.finished_at.to_rfc3339()),
+                                    .child(format_local(outcome.finished_at, self.lang)),
                             )
                             .child(
                                 div()
@@ -3477,8 +3539,9 @@ impl RustBackupApp {
                                 Button::new("lang-fr")
                                     .label("Français")
                                     .when(self.lang == Lang::Fr, |b| b.primary())
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.lang = Lang::Fr;
+                                        this.rebuild_search_input(window, cx);
                                         cx.notify();
                                     })),
                             )
@@ -3486,8 +3549,9 @@ impl RustBackupApp {
                                 Button::new("lang-en")
                                     .label("English")
                                     .when(self.lang == Lang::En, |b| b.primary())
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.lang = Lang::En;
+                                        this.rebuild_search_input(window, cx);
                                         cx.notify();
                                     })),
                             ),
@@ -3521,16 +3585,13 @@ impl RustBackupApp {
                             .gap_4()
                             .items_center()
                             .child(
-                                Switch::new("theme-switch")
-                                    .checked(self.dark)
-                                    .label(if self.dark {
-                                        t.theme_dark
-                                    } else {
-                                        t.theme_light
-                                    })
-                                    .on_change(cx.listener(|this, checked, _, cx| {
-                                        this.dark = *checked;
-                                        theme::apply_brand_theme(this.dark, cx);
+                                Button::new("theme-light")
+                                    .ghost()
+                                    .label(t.theme_light)
+                                    .when(!self.dark, |b| b.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.dark = false;
+                                        theme::apply_brand_theme(false, cx);
                                         cx.notify();
                                     })),
                             )
@@ -3542,17 +3603,6 @@ impl RustBackupApp {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.dark = true;
                                         theme::apply_brand_theme(true, cx);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("theme-light")
-                                    .ghost()
-                                    .label(t.theme_light)
-                                    .when(!self.dark, |b| b.primary())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.dark = false;
-                                        theme::apply_brand_theme(false, cx);
                                         cx.notify();
                                     })),
                             ),
@@ -3739,24 +3789,28 @@ impl gpui::Render for RustBackupApp {
             Section::Settings => self.render_settings(cx).into_any_element(),
         };
 
-        let toast = self.toast.clone().map(|(is_error, message)| {
-            let color = if is_error {
-                cx.theme().danger
-            } else {
-                cx.theme().success
-            };
-            div()
-                .id("toast")
-                .px_4()
-                .py_2()
-                .rounded_md()
-                .bg(color.opacity(0.15))
-                .border_1()
-                .border_color(color.opacity(0.5))
-                .text_size(px(12.0))
-                .text_color(cx.theme().foreground)
-                .child(message)
-        });
+        let toast = self
+            .toast
+            .clone()
+            .or_else(|| self.catalog_error.clone().map(|m| (true, m)))
+            .map(|(is_error, message)| {
+                let color = if is_error {
+                    cx.theme().danger
+                } else {
+                    cx.theme().success
+                };
+                div()
+                    .id("toast")
+                    .px_4()
+                    .py_2()
+                    .rounded_md()
+                    .bg(color.opacity(0.15))
+                    .border_1()
+                    .border_color(color.opacity(0.5))
+                    .text_size(px(12.0))
+                    .text_color(cx.theme().foreground)
+                    .child(message)
+            });
 
         div()
             .track_focus(&self.focus_handle)

@@ -8,252 +8,212 @@
 <h1 align="center">RustBackup</h1>
 
 <p align="center">
-  <strong>Fast, encrypted, content-defined deduplicated backups for Windows & Linux remote servers.</strong>
+  <strong>Encrypted, deduplicated backups for Windows — to a USB disk or a remote server over SFTP.</strong><br/>
+  A native, GPU-rendered desktop app and a scriptable CLI, built on one Rust engine.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-2024_Edition-orange?logo=rust" alt="Rust Edition 2024" />
-  <img src="https://img.shields.io/badge/GUI-GPUI_Kit_0.9.0-82642B?logo=rust" alt="GPUI Kit 0.9.0" />
-  <img src="https://img.shields.io/badge/Crypto-AES--256--GCM_%2B_Argon2id-14E0C8" alt="Crypto" />
-  <img src="https://img.shields.io/badge/Chunking-FastCDC_v2020-blue" alt="FastCDC" />
-  <img src="https://img.shields.io/badge/Catalog-DuckDB-FFF000?logo=duckdb" alt="DuckDB" />
-  <img src="https://img.shields.io/badge/Platform-Windows_11_%28x86__64%29-0078D4?logo=windows" alt="Windows 11" />
-  <img src="https://img.shields.io/badge/License-Apache--2.0-green" alt="License" />
+  <a href="https://github.com/laurentvv/rust-backup/releases/latest"><img src="https://img.shields.io/github/v/release/laurentvv/rust-backup?color=82642B&label=release" alt="Latest release" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows_11_x64-0078D4?logo=windows" alt="Windows 11 x64" />
+  <img src="https://img.shields.io/badge/Rust-2024_edition-orange?logo=rust" alt="Rust 2024 edition" />
+  <img src="https://img.shields.io/badge/crypto-AES--256--GCM_%2B_Argon2id-14E0C8" alt="AES-256-GCM and Argon2id" />
+  <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="Apache-2.0" />
 </p>
-
----
-
-## 📌 Keywords & Topics
-
-`rust` · `backup` · `deduplication` · `fastcdc` · `blake3` · `aes-256-gcm` · `argon2id` · `sftp` · `gpui` · `gpui-kit` · `desktop-app` · `windows` · `duckdb` · `data-integrity` · `cryptography`
-
----
-
-## 🚀 Overview
-
-**RustBackup** is a modern desktop backup application engineered in Rust for high throughput, cryptographic confidentiality, and content-defined storage efficiency. It pairs a headless core engine (`rb-core`) and CLI (`rbackup`) with a GPU-accelerated desktop interface built on **GPUI Kit** (Zed's GPUI engine with Longbridge component architecture).
-
-Whether backing up directly to external USB drives, local NVMe volumes, or offsite Linux servers via secure SFTP, RustBackup treats repositories as **self-contained, sovereign vaults**.
-
----
-
-## ✨ Key Features
-
-- **Full Backup, Then Incremental Forever & Configurable Full Cadence**  
-  Content-defined chunking with **FastCDC v2020** (256 KiB / 1 MiB / 4 MiB) combined with **BLAKE3** content addressing. A second run against an unchanged directory stores **zero new bytes** in fractions of a second. Automatically schedules a Full backup after $X$ incremental backups (default: 10, configurable per job or set to 0 to disable), or force a Full backup on demand at any time (`--full` or GUI toggle).
-- **Encrypt-Then-Store AEAD Cryptography**  
-  Each chunk is compressed with **zstd**, then sealed using **AES-256-GCM** with a fresh 96-bit random nonce. Associated data strictly binds `BLAKE3(plaintext) || plain_len` to prevent chunk-swapping or truncation attacks. The 256-bit master key is encrypted via **Argon2id** (64 MiB, $t=3$, $p=4$) and zeroized in memory on drop.
-- **Self-Contained Repository Format (v2, pack files)**  
-  Contains `config.json`, `keys/`, `packs/` (~16 MiB pack files), `index/` and `snapshots/`; v1 repositories (one file per chunk) stay readable. Restoring or verifying data requires **only the repository and passphrase** — zero dependence on the local database.
-- **Dual Storage Backends**  
-  - **Local Filesystems**: USB drives, external SSDs, internal mount points.
-  - **Remote SFTP**: Linux servers via `russh` & `russh-sftp` using SSH public-key authentication (OpenSSH / PEM, passphrase-protected keys, and TOFU host-key pinning).
-- **Atomic Operations by Design**  
-  All chunks and manifests land via temporary files and atomic rename. Interrupted or killed runs never produce a corrupted snapshot. Source files are opened read-only and **never modified or deleted**.
-- **Partial & Granular Restores, Fast over SFTP**  
-  Restore single files or entire directory subtrees to their original paths or a custom destination, with hierarchical tree browsing, skip/overwrite policies, and exact modification time (`mtime`) restoration. The restore is plan-driven: each pack is read once with exact, coalesced byte-range reads, every chunk is authenticated and BLAKE3-checked, and files are written in parallel with live progress (files/s, MiB/s, time left).
-- **Dual-Depth Integrity Verification**  
-  - **Quick**: Validates manifest cryptographic authentication and referenced chunk presence.
-  - **Full**: Reads, decrypts, and re-computes BLAKE3 hashes for every chunk to detect silent bit rot.
-- **Snapshot Deletion & Orphan Chunk Pruning (Garbage Collection)**  
-  Safely delete obsolete snapshot manifests with interactive modal confirmation (`AlertDialog`). Reclaim storage space by unlinking unreferenced orphan chunks while preserving shared data.
-- **Cooperative Exclusive Repository Locking**  
-  Prevents conflicting concurrent backups or maintenance runs across processes or threads via atomic JSON locks (`locks/<id>.json`) with automatic release on drop and stale-lock recovery.
-- **Local DuckDB Tracking Catalog**  
-  High-performance local embedded database tracking jobs, execution statistics, snapshot metadata, and verification history.
-- **Native GPU-Rendered GUI, "Arche" Design**  
-  Built with **GPUI Kit 0.9.0**: bilingual French (default) / English interface, keyboard shortcuts (`Ctrl+1..4`, `Ctrl+B`, `Ctrl+,`), and the Arche visual identity — limestone, ink and brass palettes in light and dark themes (WCAG 2.2 AA contrast checked by unit tests), the Newsreader display serif and an arch mark. See [`docs/design/DESIGN_SYSTEM.md`](docs/design/DESIGN_SYSTEM.md).
-
----
-
-## 🖼️ Application Preview
 
 <p align="center">
-  <img src="assets/screenshots/rustbackup-walkthrough.gif" alt="RustBackup walkthrough: dashboard, backups, restore, history, settings, dark theme" width="90%" />
+  <img src="assets/screenshots/rustbackup-walkthrough.gif" alt="RustBackup walkthrough: dashboard, backups, restore, history, settings and the dark theme" width="92%" />
 </p>
 
-### 📸 Interface Views (Arche design, English UI, demo data)
+---
 
-| **Dashboard** | **Backup Jobs (local USB and SFTP)** |
+## Why RustBackup
+
+- **Your data, sealed before it leaves the machine.** Every chunk is compressed (zstd) and encrypted with AES-256-GCM; the master key is wrapped with Argon2id. The destination only ever sees ciphertext.
+- **Self-contained repositories.** Restoring needs the repository and the passphrase — nothing else. The local catalog is a convenience, not a dependency.
+- **Fast where it matters.** Content-defined chunking and a pack-file format make incremental runs of a 22 GiB, 419k-file tree finish in under a minute, and restores read each pack once with exact byte ranges.
+- **Hard to break, safe by design.** Runs are atomic, sources are opened read-only and never modified, and a partial run can never look like a complete backup.
+
+## Download
+
+Get the latest build from the **[Releases page](https://github.com/laurentvv/rust-backup/releases/latest)**:
+
+| File | What it is |
+| :-- | :-- |
+| `RustBackup-<version>-x64.msi` | Installer: desktop app + `rbackup` CLI, Start-menu shortcut, CLI added to `PATH` |
+| `rust-backup.exe` | Portable desktop app |
+| `rbackup.exe` | Portable command-line tool |
+
+Requires Windows 11 (x64). The app is not code-signed yet, so SmartScreen may ask for confirmation on first launch.
+
+## Features
+
+**Backup**
+- Full backup first, then incremental forever; a new full backup is scheduled automatically after *N* incrementals (default 10, per job, `0` disables) or forced on demand (`--full` / GUI toggle).
+- FastCDC v2020 content-defined chunking (256 KiB / 1 MiB / 4 MiB) with BLAKE3 content addressing: an unchanged tree stores **zero new bytes**.
+- Pack-file repository format (v2, ~16 MiB packs plus an index) — a few hundred files on the server instead of hundreds of thousands. Older v1 repositories stay readable.
+- Local disks / USB drives and remote Linux servers over **SFTP** (`russh`, public-key auth, passphrase-protected keys, trust-on-first-use host-key pinning).
+- Pipelined engine: one walker, parallel compress/seal workers, parallel upload writers on their own SSH connections, batched remote durability.
+
+**Restore**
+- Restore single files or whole subtrees to the original location or any folder, with skip/overwrite policy and exact modification times.
+- Plan-driven: all needed chunks are resolved to pack ranges, each pack is read once, every chunk is authenticated and BLAKE3-checked, and files are written in parallel with live progress (files/s, MiB/s, time left).
+
+**Integrity and maintenance**
+- Quick verification (manifest authentication + chunk presence) and full verification (decrypt and re-hash every chunk).
+- Snapshot deletion and orphan-chunk pruning, always behind an explicit confirmation; pruning only ever touches the backup destination.
+- Cooperative repository locking with stale-lock recovery (`rbackup repo unlock`).
+
+**Desktop app**
+- Native GPU-rendered UI on [GPUI Kit](https://gpui-kit.com) with the *Arche* identity: limestone, ink and brass palettes in light and dark themes (WCAG 2.2 AA contrast checked by unit tests), Newsreader display serif.
+- English and French interface, keyboard shortcuts (`Ctrl+1..4`, `Ctrl+B`, `Ctrl+,`), automatic catalog refresh, readable errors.
+
+## Screenshots
+
+| **Dashboard** | **Backup jobs (USB and SFTP)** |
 | :---: | :---: |
 | ![Dashboard](assets/screenshots/01-dashboard.png) | ![Backup jobs](assets/screenshots/02-jobs.png) |
-| **Restore: snapshot list and file tree** | **Backup & Verification History** |
+| **Restore: snapshots and file tree** | **History and verification** |
 | ![Restore](assets/screenshots/04-restore.png) | ![History](assets/screenshots/05-history.png) |
-| **Settings: language, theme, passphrase** | **Dark Theme** |
+| **Settings** | **Dark theme** |
 | ![Settings](assets/screenshots/06-settings.png) | ![Dark theme dashboard](assets/screenshots/08-dashboard-dark.png) |
-| **Restore in the Dark Theme** | |
-| ![Dark theme restore](assets/screenshots/07-restore-dark.png) | |
 
-*Screenshots use a throwaway demo catalog (`RBACKUP_DB` points the GUI at any catalog file, like the CLI's `--db`).*
+<sub>Captured with a throwaway demo catalog. `RBACKUP_DB` points the GUI at any catalog file, like the CLI's `--db`.</sub>
 
----
+## Performance
 
-## ⚡ Performance Benchmarks
+### Real-world run
 
-*Measured on Windows 11 with NVMe source backing up to a USB 3.0 external drive:*
+Documents folder on a Windows 11 PC to a Linux server over SFTP (gigabit LAN, backup disk is a USB HDD mounted as NTFS through ntfs-3g):
 
-| Run Type | Files Scanned | Data Volume | Execution Time | New Chunks Stored | Efficiency |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Initial Full Run** | 6,875 files | 215.6 MB | **26.8 s** | 6,416 chunks (108 MB on disk) | 50% zstd compression |
-| **Unchanged Rerun** | 6,875 files | 215.6 MB | **0.43 s** | **0 chunks (0 B)** | 100% deduplication |
-| **Incremental Run** | 6,876 files (+1 edit) | 215.7 MB | **0.31 s** | **2 chunks (27 B)** | Instant delta storage |
-| **Integrity Verify** | 6,418 chunks | 108 MB | **2.1 s** | 0 corruptions, 0 orphans | Full BLAKE3 verify |
-| **File Restore** | 20.6 MB DLL + 4.7 MB GIF | 25.3 MB | **0.18 s** | Restored byte-identical | SHA-256 match 100% |
+| Run | Files | Source size | Stored | Time |
+| :-- | --: | --: | --: | --: |
+| Full | 418,882 | 22.3 GiB | 16.7 GiB (257,516 chunks) | **14 min 58 s** (25.4 MiB/s) |
+| Incremental, next run | 418,876 | 22.3 GiB | **2 chunks (35 KB)** | **54.9 s** |
+| Restore of a 11,443-file / 1.2 GiB folder | 11,443 | 1.2 GiB | — | **1 min 23 s**, byte-identical |
 
-### 🔀 SFTP Pipeline Throughput (LAN, NTFS-via-FUSE destination)
+### Local USB drive
 
-*Synthetic corpus (805 files, 1.04 GiB, 1 221 chunks) to a LAN server whose backup disk is a
-USB 3 TB HDD mounted as NTFS through ntfs-3g on Linux, RTT < 1 ms:*
+NVMe source to a USB 3.0 drive:
 
-| Engine | Parallel upload writers | Wall time | Average throughput |
-| :-- | :--- | :--- | :--- |
-| v1 sequential (per-chunk SFTP round trips) | 1 | 299 s | 3.5 MiB/s |
-| v2 pipeline (per-chunk fsync) | 4 | 127 s | 8.2 MiB/s |
-| v2 pipeline (per-chunk fsync), `RBACKUP_UPLOAD_WORKERS=8` | 8 | 71 s | 14.7 MiB/s |
-| **v2 pipeline, batched durability + one SSH connection per writer** | **8** | **64.5 s** | **16.1 MiB/s** |
+| Run | Files | Data | Time | New chunks |
+| :-- | --: | --: | --: | :-- |
+| Initial full | 6,875 | 215.6 MB | **26.8 s** | 6,416 (108 MB on disk) |
+| Unchanged rerun | 6,875 | 215.6 MB | **0.43 s** | **0** |
+| Incremental, 1 edit | 6,876 | 215.7 MB | **0.31 s** | 2 chunks (27 B) |
+| Full verify | 6,418 chunks | 108 MB | **2.1 s** | 0 corruptions, 0 orphans |
 
-*Small-file corpus (4 000 files of 4-128 KiB, 256 MiB), same server:* 45.5 s with per-chunk
-fsync (4 writers) → **25.8 s** with batched durability and 8 writers. Reproduce with
-`scripts/make_bench_corpus.py` + `scripts/bench_sftp.sh`.
+### SFTP pipeline (synthetic corpus, same LAN server)
 
-**Pack files (repository format v2):** new chunks are stored in ~16 MiB pack files (restic/kopia style)
-instead of one file per chunk, so the same 4 000-file corpus lands in 10 files on the server:
-45.5 s → 25.8 s → **16.0 s**; mixed corpus 74.6 s → 64.5 s → **57.0 s**. Per-file and per-directory
-restore read only the needed byte ranges. Format and crash-consistency rules: `docs/design/pack-format.md`,
-`docs/REPO_FORMAT.md`. Older repositories (one file per chunk) stay readable.
+805 files, 1.04 GiB, destination on NTFS-via-FUSE:
 
-On that destination the remaining ceiling is physical: the USB HDD writes ~60 MB/s
-sequentially and accepts ~170 new files/s through ntfs-3g whatever the client (measured
-with an independent SFTP client), so many small chunk files and several interleaved
-streams are what costs time — not the client CPU, which stays mostly idle.
+| Engine | Upload writers | Wall time | Throughput |
+| :-- | :-: | --: | --: |
+| v1 sequential | 1 | 299 s | 3.5 MiB/s |
+| v2 pipeline, per-chunk fsync | 4 | 127 s | 8.2 MiB/s |
+| v2 pipeline, per-chunk fsync | 8 | 71 s | 14.7 MiB/s |
+| **v2 pipeline, batched durability, one SSH connection per writer** | **8** | **64.5 s** | **16.1 MiB/s** |
 
-The storage engine pipelines: the walk thread only reads/chunks/hashes, worker threads
-compress and seal in parallel (all CPU cores), and parallel upload writers — each on its
-own SSH connection — store the chunks. Dedup membership comes from an in-memory index built
-once per run — no per-chunk existence round trip. Durability is batched over SFTP: chunks
-are written under temp names without a per-chunk fsync, one remote `sync` per batch makes
-them durable, then the batch is renamed into place (manifests still finalized last;
-accounts limited to SFTP fall back to a per-chunk fsync, `RBACKUP_SFTP_DURABILITY=fsync`
-forces it — see `docs/REPO_FORMAT.md`). `RBACKUP_UPLOAD_WORKERS` is clamped to 32;
-`RBACKUP_SFTP_WRITERS=channel` puts the writers back on one shared connection (then
-OpenSSH's `MaxSessions`, default 10, caps them). `RBACKUP_PROFILE=1` prints per-stage
-timings at the end of a run.
+Pack files cut the small-file case further: 4,000 files of 4–128 KiB go from 45.5 s to 25.8 s to **16.0 s** and land as 10 files on the server. The remaining ceiling on that box is the ntfs-3g daemon, not the client.
 
-### ♻️ SFTP Restore Throughput (same LAN server)
+### SFTP restore
 
-*Full restore of each corpus from the pack repository; every restored tree compared byte for byte
-with the source (`diff -r`):*
+Full restore of each corpus, compared byte for byte with the source:
 
-| Corpus | Per-chunk range reads (before) | Plan-driven restore (now) |
-| :-- | :--- | :--- |
-| 4 000 files, 4-128 KiB (256 MiB) | 105.4 s | **15.0 s** |
-| 800 files, 8-32 KiB (16 MiB) | 22.0 s | **2.6 s** |
+| Corpus | Per-chunk reads (before) | Plan-driven restore |
+| :-- | --: | --: |
+| 4,000 files, 4–128 KiB (256 MiB) | 105.4 s | **15.0 s** |
+| 800 files, 8–32 KiB (16 MiB) | 22.0 s | **2.6 s** |
 | Mixed: 4 × 256 MiB + 800 small files (1.04 GiB) | 254.2 s | **56.5 s** |
 
-Before, every chunk cost an SFTP open + seek + read + close, one after another, and the SFTP
-client's read-ahead pulled about twice the requested bytes. Now the restore plans all
-needed chunks per pack, reads each pack once through exact pipelined requests (no read-ahead past
-the range) on dedicated reader connections (`RBACKUP_SFTP_READERS`, default 4), and writes each
-chunk at its offset in every file that needs it (`RBACKUP_RESTORE_WORKERS`, default 4). Restored
-files still land via temp name + atomic rename.
+Tuning knobs (all optional): `RBACKUP_UPLOAD_WORKERS`, `RBACKUP_SFTP_WRITERS`, `RBACKUP_SFTP_READERS`, `RBACKUP_RESTORE_WORKERS`, `RBACKUP_SFTP_DURABILITY`, `RBACKUP_PROFILE=1`. Details in [docs/REPO_FORMAT.md](docs/REPO_FORMAT.md) and [docs/design/pack-format.md](docs/design/pack-format.md). Benchmarks are reproducible with `scripts/make_bench_corpus.py` and `scripts/bench_sftp.sh`.
 
----
+## Command-line usage
 
-## 🏗️ Architecture & Crates
+The repository passphrase is read from the `RBACKUP_PASSPHRASE` environment variable — never from a flag, never logged.
 
+```bash
+export RBACKUP_PASSPHRASE="a long random passphrase"
+
+# 1. Create an encrypted repository (USB disk, or a remote server over SFTP)
+rbackup repo init --dest E:\Backups\vault
+# rbackup repo init --sftp-host backup.example.com --sftp-user backup \
+#     --sftp-key ~/.ssh/id_ed25519 --sftp-root /srv/backup
+
+# 2. Define a job
+rbackup jobs add --name work-docs --source C:\Users\me\Documents \
+    --local-root E:\Backups\vault --max-incrementals 10
+
+# 3. Back up (incremental, or full by cadence; --full forces one)
+rbackup backup --job work-docs
+
+# 4. List, verify, restore
+rbackup snapshots --job work-docs
+rbackup verify --job work-docs --full
+rbackup restore --job work-docs --snapshot <snapshot-id> \
+    --path Documents/project --to D:\Restored
+
+# 5. Maintenance
+rbackup delete-snapshot --job work-docs --snapshot <snapshot-id>
+rbackup prune --job work-docs
 ```
-rust-backup (Cargo Workspace)
-├── crates/rb-core        Engine library (zero GUI dependencies)
-│   ├── backend/          StorageBackend trait: LocalFs & SftpBackend
-│   ├── chunker.rs        FastCDC v2020 chunker (256 KiB / 1 MiB / 4 MiB)
-│   ├── hash.rs           BLAKE3 ChunkHash
-│   ├── compress.rs       zstd compression with strict length checking
-│   ├── crypto.rs         MasterKey (zeroized), Argon2id wrap, AES-256-GCM AEAD
-│   ├── repo.rs           Repository v1 format (config, keys, chunks, snapshots)
-│   ├── manifest.rs       SnapshotManifest schema and serialization
-│   ├── backup.rs         Pipelined walk -> chunk -> dedup index -> parallel store
-│   ├── restore.rs        Plan resolution -> streaming verify -> atomic restore
-│   ├── verify.rs         Quick & Full repository integrity verifier
-│   └── catalog.rs        DuckDB database migrations & analytics
-│
-├── crates/rb-cli         `rbackup` headless CLI binary
-└── rust-backup           Native GUI desktop application (GPUI Kit 0.9.0)
-```
 
----
+## Build from source
 
-## 🛠️ Getting Started
-
-### Prerequisites
-
-- **OS**: Windows 11 (x86_64) or Linux
-- **Rust Toolchain**: Rust 1.85+ (MSVC on Windows)
-- **C++ Build Tools**: Visual Studio Build Tools with C++ workload & CMake on PATH
-
-### Building from Source
+Prerequisites: Windows 11 x64, a recent stable Rust toolchain (MSVC), Visual Studio Build Tools with the C++ workload, and CMake on `PATH`.
 
 ```bash
 git clone https://github.com/laurentvv/rust-backup.git
 cd rust-backup
 
-# Run verification gate (all targets & integration tests)
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --locked
 
-# Launch the GPU-accelerated desktop application
-cargo run --release --bin rust-backup
+cargo run --release --bin rust-backup     # desktop app
+cargo run --release --bin rbackup -- --help
 ```
 
----
-
-## 💻 CLI Usage (`rbackup`)
-
-The repository passphrase is read from `RBACKUP_PASSPHRASE` (never passed as a CLI flag or logged):
+The MSI is built with the [WiX Toolset](https://wixtoolset.org) v5 from `installer/RustBackup.wxs`:
 
 ```bash
-export RBACKUP_PASSPHRASE="your-secure-random-passphrase"
-
-# 1. Initialize an encrypted repository (Local USB or SFTP)
-rbackup repo init --dest E:\Backups\vault
-# Or on a remote Linux server:
-# rbackup repo init --sftp-host 192.168.1.100 --sftp-user backup --sftp-key ~/.ssh/id_ed25519 --sftp-root /srv/backup
-
-# 2. Configure a backup job (optional --max-incrementals, default 10, 0 to disable)
-rbackup jobs add --name work-docs --source C:\Users\Laurent\Documents --local-root E:\Backups\vault --max-incrementals 10
-
-# 3. Run a backup (auto-incremental or auto-full by cadence, or force full with --full)
-rbackup backup --job work-docs
-# Or force a full scan:
-# rbackup backup --job work-docs --full
-
-# 4. List snapshots
-rbackup snapshots --job work-docs
-
-# 5. Verify repository integrity
-rbackup verify --job work-docs --full
-
-# 6. Restore files or folders
-rbackup restore --job work-docs --snapshot <snapshot-uuid> --path Documents/project --to D:\Restored
-
-# 7. Delete an obsolete snapshot
-rbackup delete-snapshot --job work-docs --snapshot <snapshot-uuid>
-
-# 8. Prune orphan chunks to reclaim storage
-rbackup prune --job work-docs
+wix build installer/RustBackup.wxs -arch x64 -d Version=<version> \
+    -d BinDir=target/release -o target/dist/RustBackup-<version>-x64.msi
 ```
 
----
+## Architecture
 
-## 🔒 Security Design
+```
+rust-backup (Cargo workspace)
+├── crates/rb-core     Engine library, no GUI dependency
+│   ├── backend/       StorageBackend trait: LocalFs and SFTP
+│   ├── chunker.rs     FastCDC v2020 chunker
+│   ├── crypto.rs      Master key (zeroized), Argon2id wrap, AES-256-GCM
+│   ├── pack.rs        Pack files and index (repository format v2)
+│   ├── repo.rs        Repository: config, keys, packs, snapshots, locks
+│   ├── backup.rs      Walk -> chunk -> dedup index -> parallel store
+│   ├── restore.rs     Plan -> exact range reads -> verify -> atomic write
+│   ├── verify.rs      Quick and full integrity verification
+│   └── catalog.rs     Local DuckDB tracking catalog
+├── crates/rb-cli      `rbackup` command-line tool
+├── src/               Desktop app (GPUI Kit 0.9.0)
+└── installer/         WiX source for the MSI
+```
 
-- **Zero Secret Leakage**: Passphrases and master keys are never stored in plain text, logged, or emitted in error traces.
-- **Tamper Resistance**: Associated Data (AD) binds each chunk's content hash and plaintext length to the AEAD tag. Modifying any bit of a chunk on disk causes an instant authentication failure.
-- **Read-Only Sources**: The engine opens source directories strictly read-only.
-- **SSH TOFU Pinning**: Remote SFTP server host keys are checked against a local `known_hosts` fingerprint file on first use, rejecting silent host key changes.
+More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/REPO_FORMAT.md](docs/REPO_FORMAT.md) and [docs/design/DESIGN_SYSTEM.md](docs/design/DESIGN_SYSTEM.md).
 
-For detailed security specifications, see [docs/SECURITY.md](docs/SECURITY.md) and [docs/REPO_FORMAT.md](docs/REPO_FORMAT.md).
+## Security
 
----
+- **No secret leakage.** Passphrases and keys are never stored in clear, logged or put in error messages; the master key is zeroized on drop.
+- **Tamper evidence.** Each chunk's associated data binds its BLAKE3 hash and plaintext length to the AEAD tag, so modifying any bit on the destination fails authentication.
+- **Read-only sources.** The engine never modifies or deletes source data.
+- **SSH host-key pinning.** Server keys are checked against a local `known_hosts` file (trust on first use); a changed key is refused.
 
-## 📄 License
+Full threat model in [docs/SECURITY.md](docs/SECURITY.md).
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+## Roadmap
+
+Retention policies, scheduled runs through the Windows Task Scheduler, optional passphrase storage in the Windows Credential Manager, tray icon and notifications, and Volume Shadow Copy for locked files. Not planned: cloud targets, a background daemon, file synchronization.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

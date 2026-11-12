@@ -6380,7 +6380,7 @@ dependencies = [
 
 [[package]]
 name = "rb-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6391,7 +6391,7 @@ dependencies = [
 
 [[package]]
 name = "rb-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -6756,7 +6756,7 @@ dependencies = [
 
 [[package]]
 name = "rust-backup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",

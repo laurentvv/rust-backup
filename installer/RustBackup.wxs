@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="RustBackup" Manufacturer="RustBackup" Version="$(var.Version)"
+           UpgradeCode="6B1F3D52-4C0E-4E57-9A52-5B3C9E0A7D11" Scope="perMachine"
+           Language="1033" Codepage="1252">
+    <SummaryInformation Description="RustBackup - encrypted, deduplicated backups" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of RustBackup is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon" SourceFile="..\assets\app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/laurentvv/rust-backup" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="RustBackup" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="StartMenuDir" Name="RustBackup" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="GuiExe" Guid="*">
+        <File Id="GuiExeFile" Source="$(var.BinDir)\rust-backup.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="CliExe" Guid="*">
+        <File Id="CliExeFile" Source="$(var.BinDir)\rbackup.exe" KeyPath="yes" />
+        <Environment Id="AddToPath" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" System="yes" />
+      </Component>
+      <Component Id="LicenseFile" Guid="*">
+        <File Id="LicenseTxt" Source="..\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Component Id="StartMenuShortcut" Guid="*" Directory="StartMenuDir">
+      <Shortcut Id="AppShortcut" Name="RustBackup" Target="[INSTALLFOLDER]rust-backup.exe"
+                WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />
+      <RemoveFolder Id="RemoveStartMenuDir" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\RustBackup" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Feature Id="Main" Title="RustBackup" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>

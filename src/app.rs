@@ -125,6 +125,8 @@ pub struct RustBackupApp {
     form_compression: i32,
     editing_job_id: Option<JobId>,
     form_passphrase: gpui::Entity<InputState>,
+    /// The passphrase was preloaded from the environment or a `.env` file.
+    passphrase_from_env: bool,
     force_full: bool,
 
     phase: RunPhase,
@@ -150,6 +152,8 @@ pub struct RustBackupApp {
     restore_to_original: bool,
     restore_overwrite: bool,
     restore_busy: bool,
+    /// A snapshot list or one snapshot's file list is being read.
+    snapshot_loading: bool,
     restore_result: Option<(bool, String)>,
     restore_cancel: Option<Arc<AtomicBool>>,
     restore_files_done: u64,
@@ -297,6 +301,7 @@ impl RustBackupApp {
                     .placeholder("••••••••••")
                     .masked(true)
             }),
+            passphrase_from_env: false,
             force_full: false,
             phase: RunPhase::Idle,
             run_files_done: 0,
@@ -320,6 +325,7 @@ impl RustBackupApp {
             restore_to_original: false,
             restore_overwrite: false,
             restore_busy: false,
+            snapshot_loading: false,
             restore_result: None,
             restore_cancel: None,
             restore_files_done: 0,
@@ -344,6 +350,11 @@ impl RustBackupApp {
         };
         // Palette applied once at startup; runtime switching happens in
         // Settings via theme::apply_brand_theme.
+        if let Some(passphrase) = runner::passphrase_from_env() {
+            app.form_passphrase
+                .update(cx, |input, cx| input.set_value(passphrase, window, cx));
+            app.passphrase_from_env = true;
+        }
         app.refresh_catalog();
         // The catalog can change under the window (CLI or scheduled runs):
         // re-read it every few seconds while the app is idle.
@@ -385,6 +396,20 @@ impl RustBackupApp {
         chrono::DateTime::parse_from_rfc3339(raw)
             .map(|dt| format_local(dt.with_timezone(&chrono::Utc), self.lang))
             .unwrap_or_else(|_| raw.to_string())
+    }
+
+    /// Switches page; entering Restore with a passphrase available loads the
+    /// snapshot list without an extra click.
+    fn go_to(&mut self, section: Section, cx: &mut gpui::Context<Self>) {
+        self.section = section;
+        if section == Section::Restore
+            && self.snapshots.is_empty()
+            && !self.restore_busy
+            && !self.current_passphrase(cx).is_empty()
+        {
+            self.load_snapshots(cx);
+        }
+        cx.notify();
     }
 
     fn texts(&self) -> &'static i18n::Texts {
@@ -599,19 +624,102 @@ impl RustBackupApp {
             cx.notify();
             return;
         }
-        self.restore_busy = true;
+        if self.snapshot_loading {
+            return;
+        }
+
+        // Fast path: the catalog already knows every snapshot of this job, so
+        // the list shows at once and only the newest snapshot's files are read.
+        let cached = self
+            .catalog_path()
+            .and_then(|path| Catalog::open(&path).ok())
+            .and_then(|catalog| catalog.list_snapshots(job.id).ok())
+            .unwrap_or_default();
+        if !cached.is_empty() {
+            let mut rows: Vec<runner::SnapshotRow> = cached
+                .into_iter()
+                .map(|snapshot| runner::SnapshotRow {
+                    id: snapshot.id,
+                    created_at: snapshot.created_at.to_rfc3339(),
+                    files: usize::try_from(snapshot.files_total).unwrap_or(usize::MAX),
+                    entries: Vec::new(),
+                    kind: snapshot.kind,
+                    entries_loaded: false,
+                })
+                .collect();
+            rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            let newest = rows.first().map(|r| r.id);
+            self.selected_snapshot = newest;
+            self.selected_paths.clear();
+            self.snapshots = rows;
+            self.restore_result = None;
+            if let Some(id) = newest {
+                self.load_entries(cx, id);
+            }
+            cx.notify();
+            return;
+        }
+
+        // No catalog knowledge (new machine): read every manifest.
+        self.snapshot_loading = true;
         cx.notify();
         let rx = runner::spawn_snapshots(job, passphrase);
         cx.spawn(async move |this, cx| {
             if let Ok(rows) = rx.recv_async().await {
                 let _ = this.update(cx, |app, cx| {
-                    app.restore_busy = false;
+                    app.snapshot_loading = false;
                     match rows {
                         Ok(mut rows) => {
                             rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                             app.selected_snapshot = rows.first().map(|r| r.id);
                             app.selected_paths.clear();
                             app.snapshots = rows;
+                        }
+                        Err(message) => app.restore_result = Some((true, message)),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Reads the file list of one snapshot unless it is already loaded.
+    fn load_entries(&mut self, cx: &mut gpui::Context<Self>, snapshot_id: uuid::Uuid) {
+        let loaded = self
+            .snapshots
+            .iter()
+            .find(|s| s.id == snapshot_id)
+            .is_none_or(|s| s.entries_loaded);
+        if loaded || self.snapshot_loading {
+            return;
+        }
+        let job = self
+            .selected_restore_job
+            .and_then(|id| self.jobs.iter().find(|j| j.id == id).cloned())
+            .or_else(|| self.jobs.first().cloned());
+        let Some(job) = job else {
+            return;
+        };
+        let passphrase = self.current_passphrase(cx);
+        if passphrase.is_empty() {
+            return;
+        }
+        self.snapshot_loading = true;
+        cx.notify();
+        let rx = runner::spawn_snapshot_entries(job, passphrase, snapshot_id);
+        cx.spawn(async move |this, cx| {
+            if let Ok(result) = rx.recv_async().await {
+                let _ = this.update(cx, |app, cx| {
+                    app.snapshot_loading = false;
+                    match result {
+                        Ok(entries) => {
+                            if let Some(row) =
+                                app.snapshots.iter_mut().find(|s| s.id == snapshot_id)
+                            {
+                                row.entries = entries;
+                                row.entries_loaded = true;
+                            }
                         }
                         Err(message) => app.restore_result = Some((true, message)),
                     }
@@ -2534,8 +2642,9 @@ impl RustBackupApp {
                         .text_size(px(11.0))
                         .text_color(cx.theme().muted_foreground)
                         .child(format!(
-                            "{} files ({})",
+                            "{} {} ({})",
                             folder_files.len(),
+                            lang.texts().files,
                             human_bytes_lang(total_size, lang)
                         )),
                 );
@@ -2692,6 +2801,7 @@ impl RustBackupApp {
                                 cx.listener(move |this, _, _, cx| {
                                     this.selected_snapshot = Some(row_id);
                                     this.selected_paths.clear();
+                                    this.load_entries(cx, row_id);
                                     cx.notify();
                                 }),
                             ),
@@ -3087,14 +3197,15 @@ impl RustBackupApp {
                     .border_color(cx.theme().border)
                     .text_size(px(13.0))
                     .text_color(cx.theme().muted_foreground)
-                    .child(
-                        if self.cached_snapshot_count > 0 && self.current_passphrase(cx).is_empty()
-                        {
-                            t.snapshots_need_passphrase
-                        } else {
-                            t.no_snapshots
-                        },
-                    )
+                    .child(if self.snapshot_loading {
+                        t.loading_snapshots
+                    } else if self.cached_snapshot_count > 0
+                        && self.current_passphrase(cx).is_empty()
+                    {
+                        t.snapshots_need_passphrase
+                    } else {
+                        t.no_snapshots
+                    })
                     .into_any_element()
             } else {
                 let mut snap_list = v_flex().gap_1();
@@ -3107,6 +3218,14 @@ impl RustBackupApp {
                 this.child(
                     v_flex()
                         .gap_2()
+                        .when(self.snapshot_loading, |this| {
+                            this.child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(t.loading_snapshots),
+                            )
+                        })
                         .child(
                             h_flex()
                                 .gap_2()
@@ -3627,7 +3746,11 @@ impl RustBackupApp {
                         div()
                             .text_size(px(12.0))
                             .text_color(cx.theme().muted_foreground)
-                            .child(t.passphrase_help),
+                            .child(if self.passphrase_from_env {
+                                t.passphrase_from_env
+                            } else {
+                                t.passphrase_help
+                            }),
                     ),
             )
             .child(
@@ -3677,8 +3800,7 @@ impl gpui::Render for RustBackupApp {
                 .icon(icon)
                 .active(is_active)
                 .on_click(cx.listener(move |this, _, _window, cx| {
-                    this.section = section;
-                    cx.notify();
+                    this.go_to(section, cx);
                 }));
             // An unparsable shortcut simply shows no hint instead of panicking.
             if let Some(keystroke) = shortcut.and_then(|sc| gpui::Keystroke::parse(sc).ok()) {
@@ -3823,8 +3945,7 @@ impl gpui::Render for RustBackupApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoRestoreAction, _, cx| {
-                this.section = Section::Restore;
-                cx.notify();
+                this.go_to(Section::Restore, cx);
             }))
             .on_action(cx.listener(|this, _: &GoHistoryAction, _, cx| {
                 this.section = Section::History;

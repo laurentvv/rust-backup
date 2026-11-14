@@ -65,6 +65,32 @@ pub fn catalog_path() -> rb_core::Result<std::path::PathBuf> {
     }
 }
 
+/// Extracts the repository passphrase from `.env`-style text: the first
+/// `RBACKUP_PASSPHRASE=` line, value taken verbatim (spaces and quotes kept).
+pub fn parse_env_passphrase(content: &str) -> Option<String> {
+    content
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .find_map(|line| line.strip_prefix("RBACKUP_PASSPHRASE="))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// Repository passphrase supplied by the environment: the `RBACKUP_PASSPHRASE`
+/// variable, else a `.env` file next to the executable (as the scheduled
+/// backup does). `None` when neither provides one.
+pub fn passphrase_from_env() -> Option<String> {
+    if let Some(value) = std::env::var("RBACKUP_PASSPHRASE")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        return Some(value);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let content = std::fs::read_to_string(exe.parent()?.join(".env")).ok()?;
+    parse_env_passphrase(&content)
+}
+
 /// Spawns a backup run on its own thread. Returns the event stream and the
 /// cooperative cancel flag.
 pub fn spawn_backup(
@@ -271,6 +297,44 @@ pub struct SnapshotRow {
     pub entries: Vec<(String, String, u64)>,
     /// Kind of backup (full or incremental).
     pub kind: rb_core::domain::BackupKind,
+    /// False when `entries` has not been read from the repository yet (the
+    /// snapshot list comes from the catalog; entries load on demand).
+    pub entries_loaded: bool,
+}
+
+/// One file of a snapshot: (source root, relative path, size in bytes).
+pub type SnapshotEntry = (String, String, u64);
+
+/// Reads one snapshot's file list from the repository on a background thread
+/// (a big manifest takes seconds: only the selected snapshot is read).
+pub fn spawn_snapshot_entries(
+    job: JobConfig,
+    passphrase: String,
+    snapshot_id: Uuid,
+) -> Receiver<Result<Vec<SnapshotEntry>, String>> {
+    let (tx, rx) = flume::bounded(1);
+    std::thread::spawn(move || {
+        let result = (|| {
+            let backend = open_backend(&job.destination).map_err(|e| e.to_string())?;
+            let repo =
+                rb_core::repo::Repository::open(backend, &passphrase).map_err(|e| e.to_string())?;
+            let manifest = repo
+                .read_manifest(&snapshot_id)
+                .map_err(|e| e.to_string())?;
+            Ok(manifest
+                .iter_files()
+                .map(|(source, entry)| {
+                    (
+                        source.root.to_string_lossy().to_string(),
+                        entry.path.to_string_lossy().replace('\\', "/"),
+                        entry.size,
+                    )
+                })
+                .collect())
+        })();
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 /// Loads the snapshots of a job's repository on a background thread.
@@ -305,6 +369,7 @@ pub fn spawn_snapshots(
                     files: manifest.file_count(),
                     entries,
                     kind: manifest.kind,
+                    entries_loaded: true,
                 });
             }
             Ok(rows)
@@ -505,6 +570,14 @@ mod tests {
     use std::path::PathBuf;
 
     const PASSPHRASE: &str = "runner test passphrase";
+
+    #[test]
+    fn env_passphrase_keeps_spaces_and_ignores_other_lines() {
+        let text = "\u{feff}OTHER=1\r\nRBACKUP_PASSPHRASE=a b  c\r\nRBACKUP_PASSPHRASE=second\r\n";
+        assert_eq!(parse_env_passphrase(text).as_deref(), Some("a b  c"));
+        assert_eq!(parse_env_passphrase("RBACKUP_PASSPHRASE=\n"), None);
+        assert_eq!(parse_env_passphrase("nothing here"), None);
+    }
 
     struct Fixture {
         base: PathBuf,

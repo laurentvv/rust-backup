@@ -88,6 +88,8 @@ pub struct Texts {
     pub passphrase: &'static str,
     /// Settings: passphrase help.
     pub passphrase_help: &'static str,
+    /// Settings: the passphrase came from the environment or a `.env` file.
+    pub passphrase_from_env: &'static str,
     /// Status: passphrase active.
     pub passphrase_set: &'static str,
     /// Status: passphrase not set.
@@ -138,6 +140,8 @@ pub struct Texts {
     pub catalog_unreadable: &'static str,
     /// History table: date column header.
     pub date_col: &'static str,
+    /// Restore page: snapshot list or file list is loading.
+    pub loading_snapshots: &'static str,
     /// zstd level buttons in the job form.
     pub level_none: &'static str,
     /// zstd level 1.
@@ -311,6 +315,7 @@ pub const FR: Texts = Texts {
     theme_light: "Clair",
     passphrase: "Phrase secrète du dépôt",
     passphrase_help: "Stockée en mémoire pour la session uniquement — jamais affichée ni journalisée.",
+    passphrase_from_env: "Chargée depuis RBACKUP_PASSPHRASE ou le fichier .env placé à côté de l'application.",
     passphrase_set: "Phrase secrète en mémoire",
     passphrase_unset: "Phrase secrète non définie",
     catalog_location: "Base de suivi locale",
@@ -336,6 +341,7 @@ pub const FR: Texts = Texts {
     snapshots_need_passphrase: "Des instantanés existent : définissez la phrase secrète dans Paramètres, puis cliquez sur Actualiser.",
     catalog_unreadable: "Catalogue illisible (verrouillé par un autre processus ?) : nouvelle tentative automatique.",
     date_col: "Date",
+    loading_snapshots: "Chargement des instantanés… (quelques dizaines de secondes sur un gros dépôt)",
     level_none: "0 (aucune)",
     level_fast: "1 (rapide)",
     level_balanced: "5 (équilibrée)",
@@ -443,6 +449,7 @@ pub const EN: Texts = Texts {
     theme_light: "Light",
     passphrase: "Repository passphrase",
     passphrase_help: "Kept in memory for the session only — never shown or logged.",
+    passphrase_from_env: "Loaded from RBACKUP_PASSPHRASE or the .env file next to the application.",
     passphrase_set: "Passphrase active in memory",
     passphrase_unset: "Passphrase not set",
     catalog_location: "Local tracking database",
@@ -468,6 +475,7 @@ pub const EN: Texts = Texts {
     snapshots_need_passphrase: "Snapshots exist: set the passphrase in Settings, then click Refresh.",
     catalog_unreadable: "Catalog unreadable (locked by another process?): retrying automatically.",
     date_col: "Date",
+    loading_snapshots: "Loading snapshots… (a large repository can take tens of seconds)",
     level_none: "0 (none)",
     level_fast: "1 (fast)",
     level_balanced: "5 (balanced)",
